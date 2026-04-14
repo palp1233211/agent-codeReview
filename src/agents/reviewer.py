@@ -91,7 +91,7 @@ class CodeReviewAgent:
     def _get_options_with_yunxiao(
         self,
         dimensions: list[str] | None = None,
-        permission_mode: str = "default",
+        permission_mode: str = "acceptEdits",  # CLI/API 自动接受工具调用
     ) -> ClaudeAgentOptions:
         """获取包含云效工具的 Agent 配置。
 
