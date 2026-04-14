@@ -91,14 +91,14 @@ class CodeReviewAgent:
     def _get_options_with_yunxiao(
         self,
         dimensions: list[str] | None = None,
-        permission_mode: str = "acceptEdits",  # 自动接受编辑（兼容 root 用户）
+        permission_mode: str = "bypassPermissions",  # 自动授权（非 root 用户可用）
     ) -> ClaudeAgentOptions:
         """获取包含云效工具的 Agent 配置。
 
         架构说明：
         - Claude Code 会话：subagent 通过父会话访问全局 yunxiao MCP（不传 mcp_servers）
         - CLI/API 独立进程：必须显式传 mcp_servers，否则子进程无法访问云效工具
-        - 注意：bypassPermissions 不能以 root 运行，acceptEdits 可以
+        - 注意：bypassPermissions 不能以 root 运行，需用普通用户
         """
         return ClaudeAgentOptions(
             allowed_tools=["Agent"],
