@@ -9,7 +9,6 @@ from claude_agent_sdk import (
     ResultMessage,
     TextBlock,
     ToolUseBlock,
-    PermissionResultAllow,
 )
 
 from ..hooks import get_hooks_config
@@ -92,22 +91,15 @@ class CodeReviewAgent:
     def _get_options_with_yunxiao(
         self,
         dimensions: list[str] | None = None,
-        permission_mode: str = "auto",  # CLI/API 自动模式
+        permission_mode: str = "bypassPermissions",  # 自动授权（非 root 用户可用）
     ) -> ClaudeAgentOptions:
         """获取包含云效工具的 Agent 配置。
 
         架构说明：
         - Claude Code 会话：subagent 通过父会话访问全局 yunxiao MCP（不传 mcp_servers）
         - CLI/API 独立进程：必须显式传 mcp_servers，否则子进程无法访问云效工具
+        - 注意：bypassPermissions 不能以 root 运行，需用普通用户
         """
-        # 自动授权回调：所有工具调用都允许
-        async def auto_approve_all(
-            tool_name: str,
-            tool_input: dict[str, Any],
-            context: Any,
-        ) -> PermissionResultAllow:
-            return PermissionResultAllow()
-
         return ClaudeAgentOptions(
             allowed_tools=["Agent"],
             permission_mode=permission_mode,
@@ -115,8 +107,6 @@ class CodeReviewAgent:
             agents={"yunxiao-mr-reviewer": YUNXIAO_MR_AGENT},
             # CLI/API 独立进程必须传 mcp_servers
             mcp_servers=self.mcp_servers,
-            # 自动授权所有工具调用
-            can_use_tool=auto_approve_all,
         )
 
     async def review_git_diff(
