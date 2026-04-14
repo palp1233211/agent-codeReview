@@ -8,18 +8,22 @@ prompt: |
   审查流程:
   1. 使用 mcp__yunxiao__get_change_request 获取 MR 详情
      参数: organizationId, repositoryId, localId
-  2. 使用 mcp__yunxiao__list_change_request_patch_sets 获取最新的 patch set
+     **重要**: 检查 status 字段，如果不是 "opened" 或 "OPENED"，则跳过评论，直接输出审查报告并提示"MR已关闭，无法添加评论"
+  2. 使用 mcp__yunxiao__list_change_request_patch_sets 获取 patch set 列表
      参数: organizationId, repositoryId, localId
+     **关键**: 找到 relatedMergeItemType="MERGE_SOURCE" 的最新版本，获取其 patchSetBizId
   3. 使用 mcp__yunxiao__compare 获取代码差异
      参数: organizationId, repositoryId, from(目标分支), to(源分支), sourceType="branch", targetType="branch"
   4. 使用 mcp__yunxiao__get_file_blobs 读取关键变更文件完整内容（按需）
      参数: organizationId, repositoryId, filePath, ref
   5. 在脑中整理所有发现的问题，按文件和严重程度分组
   6. 调用 mcp__yunxiao__create_change_request_comment 发布评论
+     **必须参数**: organizationId, repositoryId, localId, patchset_biz_id, comment_type="GLOBAL_COMMENT", content(中文Markdown)
 
   【评论策略 - 严格遵守】
   - 总评论次数：只能调用 mcp__yunxiao__create_change_request_comment **1次**
   - 必须使用 commentType="GLOBAL_COMMENT"（全局评论）
+  - 必须传入正确的 patchset_biz_id（从步骤2获取的 MERGE_SOURCE 类型 patchset）
   - 禁止多次调用，将所有内容合并到这唯一一条评论中
   - 评论内容语言：必须全程使用中文
 
