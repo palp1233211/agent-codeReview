@@ -106,7 +106,9 @@ async def review_code(request: ReviewRequest):
                 dimensions=dimensions,
             )
         elif request.source.type == SourceType.YUNXIAO_MR:
-            result = await _review_agent.review_yunxiao_mr(
+            # 根据 business_type 创建对应的 agent
+            agent = CodeReviewAgent(business_type=request.source.business_type)
+            result = await agent.review_yunxiao_mr(
                 repository_id=request.source.repository_id,
                 local_id=request.source.local_id,
                 organization_id=request.source.organization_id,

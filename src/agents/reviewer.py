@@ -5,7 +5,6 @@ from typing import Any
 from claude_agent_sdk import (
     query,
     ClaudeAgentOptions,
-    AgentDefinition,
     AssistantMessage,
     ResultMessage,
     TextBlock,
@@ -14,6 +13,11 @@ from claude_agent_sdk import (
 
 from ..hooks import get_hooks_config
 from ..tools import git_server, complexity_server, linter_server
+from ..prompts import (
+    load_agent_definition,
+    load_business_agents,
+    YUNXIAO_MR_AGENT,  # 云效 MR agent 保持固定配置
+)
 
 # 默认组织 ID
 DEFAULT_ORG_ID = os.getenv("YUNXIAO_ORG_ID", "5ea86562f89c9700014a671f")
@@ -27,135 +31,22 @@ YUNXIAO_MCP_CONFIG = {
     },
 }
 
-# Security Review Subagent
-SECURITY_AGENT = AgentDefinition(
-    description="安全审查专家。检查代码中的安全漏洞、敏感信息暴露、权限控制问题。",
-    prompt="""你是安全审查专家，专注于发现代码中的安全风险。
-
-审查重点:
-1. **注入漏洞**: SQL注入、XSS、命令注入
-2. **认证授权**: 弱密码、缺少权限检查、会话管理
-3. **敏感信息**: API密钥、密码、个人数据暴露
-4. **加密安全**: 弱加密算法、不安全的随机数
-5. **网络安全**: SSRF、CSRF、开放重定向
-
-每个问题输出:
-- severity: Critical/High/Medium/Low
-- location: 文件路径和行号
-- description: 问题描述
-- fix_suggestion: 修复建议
-
-使用 security_scan 和 check_secrets 工具进行扫描。""",
-    tools=["security_scan", "check_secrets", "Read", "Grep", "Glob"],
-)
-
-# Quality Review Subagent
-QUALITY_AGENT = AgentDefinition(
-    description="代码质量审查专家。检查代码结构、命名规范、复杂度、重复代码。",
-    prompt="""你是代码质量审查专家，专注于提升代码的可维护性。
-
-审查重点:
-1. **命名规范**: 变量、函数、类名是否清晰有意义
-2. **代码结构**: 函数是否过长、职责是否单一
-3. **复杂度**: 圈复杂度是否过高、嵌套是否过深
-4. **重复代码**: 是否有可以抽取的公共逻辑
-5. **错误处理**: 异常是否正确处理、边界条件是否考虑
-
-每个问题输出:
-- severity: Critical/High/Medium/Low/Info
-- location: 文件路径和行号
-- description: 问题描述
-- fix_suggestion: 改进建议
-
-使用 analyze_complexity、analyze_maintainability、check_code_duplication 工具进行分析。""",
-    tools=["analyze_complexity", "analyze_maintainability", "check_code_duplication", "Read", "Grep", "Glob"],
-)
-
-# Performance Review Subagent
-PERFORMANCE_AGENT = AgentDefinition(
-    description="性能审查专家。检查代码中的性能瓶颈、资源使用问题。",
-    prompt="""你是性能审查专家，专注于发现代码的性能问题。
-
-审查重点:
-1. **数据库**: N+1查询、缺少索引、连接未关闭
-2. **内存**: 内存泄漏、大对象未释放
-3. **计算**: 重复计算、不必要的循环、算法效率
-4. **IO**: 阻塞操作、大量小文件读写
-5. **并发**: 死锁风险、竞态条件
-
-每个问题输出:
-- severity: Critical/High/Medium/Low
-- location: 文件路径和行号
-- description: 问题描述
-- impact: 预估性能影响
-- fix_suggestion: 优化建议
-
-使用 analyze_complexity 工具结合代码阅读进行分析。""",
-    tools=["analyze_complexity", "Read", "Grep", "Glob"],
-)
-
-# 云效 MR Review Subagent
-# 工具名使用 mcp__yunxiao__* 格式（Claude Code 全局已配置 yunxiao MCP server）
-YUNXIAO_MR_AGENT = AgentDefinition(
-    description="云效 MR 审查专家。审查云效平台上的 Merge Request，分析代码变更并添加评论。",
-    prompt="""你是云效 MR 审查专家。所有输出内容必须使用中文，包括评论内容。
-
-审查流程:
-1. 使用 mcp__yunxiao__get_change_request 获取 MR 详情
-   参数: organizationId, repositoryId, localId
-2. 使用 mcp__yunxiao__list_change_request_patch_sets 获取最新的 patch set
-   参数: organizationId, repositoryId, localId
-3. 使用 mcp__yunxiao__compare 获取代码差异
-   参数: organizationId, repositoryId, from(目标分支), to(源分支), sourceType="branch", targetType="branch"
-4. 使用 mcp__yunxiao__get_file_blobs 读取关键变更文件完整内容（按需）
-   参数: organizationId, repositoryId, filePath, ref
-5. 在脑中整理所有发现的问题，按文件和严重程度分组
-6. 调用 mcp__yunxiao__create_change_request_comment 发布评论
-
-【评论策略 - 严格遵守】
-- 总评论次数：只能调用 mcp__yunxiao__create_change_request_comment **1次**
-- 必须使用 commentType="GLOBAL_COMMENT"（全局评论）
-- 禁止多次调用，将所有内容合并到这唯一一条评论中
-- 评论内容语言：必须全程使用中文
-
-唯一一条全局评论的格式（Markdown）:
-
-## 🤖 AI 代码审查报告
-
-### 🔴 高危问题
-对每个高危问题，格式：
-**[问题类型]** `文件名:行号`
-> 问题描述（中文）
-> 修复建议（中文）
-
-### 🟡 中等问题
-对每个中等问题，格式同上
-
-### 🟢 建议改进
-对每个低优先级建议，格式同上
-
-### 📊 整体评价
-一段话总结变更质量、主要风险、是否建议合并""",
-    tools=[
-        "mcp__yunxiao__get_change_request",
-        "mcp__yunxiao__list_change_request_patch_sets",
-        "mcp__yunxiao__compare",
-        "mcp__yunxiao__list_change_request_comments",
-        "mcp__yunxiao__get_file_blobs",
-        "mcp__yunxiao__list_files",
-        "mcp__yunxiao__create_change_request_comment",
-        "Agent",
-    ],
-)
-
 
 class CodeReviewAgent:
     """Code Review Agent 主类"""
 
     def __init__(
         self,
+        business_type: str = "default",
         custom_hooks: dict[str, Any] | None = None,
     ):
+        """初始化 Code Review Agent
+
+        Args:
+            business_type: 业务类型（default, frontend, backend）
+            custom_hooks: 自定义 hooks 配置
+        """
+        self.business_type = business_type
         # mcp_servers 为 dict 格式：key=server名, value=server配置或对象
         self.mcp_servers = {
             "git-tools": git_server,
@@ -172,21 +63,17 @@ class CodeReviewAgent:
         permission_mode: str = "default",
     ) -> ClaudeAgentOptions:
         """获取 Agent 配置（不含云效工具）"""
-        agents: dict[str, AgentDefinition] = {}
+        # 加载业务场景对应的 Agent 配置
+        agents = load_business_agents(self.business_type)
 
-        if dimensions is None or "all" in dimensions:
-            agents = {
-                "security-reviewer": SECURITY_AGENT,
-                "quality-reviewer": QUALITY_AGENT,
-                "performance-reviewer": PERFORMANCE_AGENT,
-            }
-        else:
-            if "security" in dimensions:
-                agents["security-reviewer"] = SECURITY_AGENT
-            if "quality" in dimensions:
-                agents["quality-reviewer"] = QUALITY_AGENT
-            if "performance" in dimensions:
-                agents["performance-reviewer"] = PERFORMANCE_AGENT
+        # 根据 dimensions 过滤
+        if dimensions is not None and "all" not in dimensions:
+            filtered_agents: dict[str, Any] = {}
+            for dim in dimensions:
+                agent_name = f"{dim}-reviewer"
+                if agent_name in agents:
+                    filtered_agents[agent_name] = agents[agent_name]
+            agents = filtered_agents
 
         return ClaudeAgentOptions(
             allowed_tools=[
@@ -291,8 +178,8 @@ class CodeReviewAgent:
             permission_mode="default",
             hooks=self.hooks,
             agents={
-                "security-reviewer": SECURITY_AGENT,
-                "quality-reviewer": QUALITY_AGENT,
+                "security-reviewer": load_agent_definition("security"),
+                "quality-reviewer": load_agent_definition("quality"),
             },
         )
 

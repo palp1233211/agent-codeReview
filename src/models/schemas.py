@@ -51,6 +51,7 @@ class YunxiaoMRSource(BaseModel):
     local_id: str = Field(..., description="MR局部ID")
     organization_id: str | None = Field(default=None, description="组织ID，默认读取 YUNXIAO_ORG_ID 环境变量")
     auto_comment: bool = Field(default=True, description="是否自动在MR上添加评论")
+    business_type: str = Field(default="default", description="业务类型（default, frontend, backend）")
 
 
 class ReviewRequest(BaseModel):

@@ -35,16 +35,18 @@ async def cmd_yunxiao_mr(
     organization_id: str,
     dimensions: list[str] | None,
     auto_comment: bool,
+    business_type: str,
 ) -> None:
     """审查云效 MR，直接调用 CodeReviewAgent"""
     from src.agents.reviewer import CodeReviewAgent
 
     print(f"\n🚀 开始审查 MR #{local_id}（仓库: {repository_id}）")
+    print(f"   业务类型: {business_type}")
     print(f"   维度: {dimensions or 'all'}")
     print(f"   自动评论: {auto_comment}")
     print()
 
-    agent = CodeReviewAgent()
+    agent = CodeReviewAgent(business_type=business_type)
 
     dim_values = None
     if dimensions and "all" not in dimensions:
@@ -144,6 +146,9 @@ def main():
                    choices=["security", "quality", "performance", "all"],
                    default=["all"], help="审查维度")
     p.add_argument("--no-comment", action="store_true", help="不自动发评论")
+    p.add_argument("-b", "--business", default="default",
+                   choices=["default", "frontend", "backend"],
+                   help="业务类型（default/frontend/backend）")
 
     # files
     p = subparsers.add_parser("files", help="审查本地文件")
@@ -173,6 +178,7 @@ def main():
             organization_id=args.organization or os.getenv("YUNXIAO_ORG_ID", "5ea86562f89c9700014a671f"),
             dimensions=args.dimensions,
             auto_comment=not args.no_comment,
+            business_type=args.business,
         ))
     elif args.command == "files":
         asyncio.run(cmd_files(args.paths, args.dimensions))
