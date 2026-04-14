@@ -96,18 +96,16 @@ class CodeReviewAgent:
         """获取包含云效工具的 Agent 配置。
 
         架构说明：
-        - query() 子进程本身没有 yunxiao MCP 工具（新进程，无全局 Claude Code 设置）
-        - 但 query() 子进程通过 Agent 工具启动的 subagent，运行在父 Claude Code 会话中，
-          因此可以访问父会话全局注册的 yunxiao MCP server（~/.claude/settings.json）
-        - 所以正确方案是：outer agent 调用 Agent 工具 → yunxiao-mr-reviewer subagent → 调用 mcp__yunxiao__* 工具
-        - 注意：不能显式传 mcp_servers（会启动新进程导致认证失败）
+        - Claude Code 会话：subagent 通过父会话访问全局 yunxiao MCP（不传 mcp_servers）
+        - CLI/API 独立进程：必须显式传 mcp_servers，否则子进程无法访问云效工具
         """
         return ClaudeAgentOptions(
-            allowed_tools=["Agent"],  # outer agent 只需能调用 Agent 工具（启动 subagent）
+            allowed_tools=["Agent"],
             permission_mode=permission_mode,
             hooks=self.hooks,
             agents={"yunxiao-mr-reviewer": YUNXIAO_MR_AGENT},
-            # 不传 mcp_servers！让 subagent 通过父 Claude Code 会话访问全局 yunxiao MCP server
+            # CLI/API 独立进程必须传 mcp_servers
+            mcp_servers=self.mcp_servers,
         )
 
     async def review_git_diff(
