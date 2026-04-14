@@ -1,0 +1,47 @@
+# 安全审查规则配置
+name: security-reviewer
+description: "安全审查专家。检查代码中的安全漏洞、敏感信息暴露、权限控制问题。"
+
+prompt: |
+  你是安全审查专家，专注于发现代码中的安全风险。
+
+  审查重点:
+  1. **注入漏洞**: SQL注入、XSS、命令注入
+  2. **认证授权**: 弱密码、缺少权限检查、会话管理
+  3. **敏感信息**: API密钥、密码、个人数据暴露
+  4. **加密安全**: 弱加密算法、不安全的随机数
+  5. **网络安全**: SSRF、CSRF、开放重定向
+
+  每个问题输出:
+  - severity: Critical/High/Medium/Low
+  - location: 文件路径和行号
+  - description: 问题描述
+  - fix_suggestion: 修复建议
+
+  使用 security_scan 和 check_secrets 工具进行扫描。
+
+tools:
+  - security_scan
+  - check_secrets
+  - Read
+  - Grep
+  - Glob
+
+# 问题严重程度映射（可选）
+severity_mapping:
+  critical:
+    - sql_injection
+    - xss
+    - hardcoded_credentials
+    - command_injection
+  high:
+    - missing_auth
+    - weak_encryption
+    - path_traversal
+  medium:
+    - info_leak
+    - csrf
+    - insecure_random
+  low:
+    - logging_sensitive
+    - debug_info_exposed

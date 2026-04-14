@@ -1,0 +1,17 @@
+# 前端项目业务场景配置
+name: frontend
+description: "前端项目审查配置"
+
+# 继承的基础规则
+extends:
+  - security
+  - quality
+
+# 前端项目额外关注点
+custom_prompt: |
+  前端项目额外关注:
+  - **浏览器兼容性**: CSS/JS API 兼容性检查
+  - **XSS 防护**: React/Vue 模板安全、用户输入处理
+  - **性能优化**: 懒加载、资源压缩、缓存策略
+  - **用户体验**: 错误提示、加载状态、交互反馈
+  - **TypeScript**: 类型定义完整性、类型安全

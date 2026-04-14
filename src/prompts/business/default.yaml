@@ -1,0 +1,12 @@
+# 默认业务场景配置
+name: default
+description: "默认代码审查配置，适用于通用项目"
+
+# 继承的基础规则
+extends:
+  - security
+  - quality
+  - performance
+
+# 默认不添加额外自定义提示词
+custom_prompt: null
