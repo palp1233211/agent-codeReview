@@ -22,14 +22,16 @@ from ..prompts import (
 # 默认组织 ID
 DEFAULT_ORG_ID = os.getenv("YUNXIAO_ORG_ID", "5ea86562f89c9700014a671f")
 
-# 真实云效 MCP Server 配置（外部 stdio 进程）
-YUNXIAO_MCP_CONFIG = {
-    "command": "npx",
-    "args": ["-y", "alibabacloud-devops-mcp-server"],
-    "env": {
-        "YUNXIAO_ACCESS_TOKEN": os.getenv("YUNXIAO_ACCESS_TOKEN", ""),
-    },
-}
+
+def _get_yunxiao_mcp_config() -> dict[str, Any]:
+    """获取云效 MCP 配置（延迟读取环境变量）"""
+    return {
+        "command": "npx",
+        "args": ["-y", "alibabacloud-devops-mcp-server"],
+        "env": {
+            "YUNXIAO_ACCESS_TOKEN": os.getenv("YUNXIAO_ACCESS_TOKEN", ""),
+        },
+    }
 
 
 class CodeReviewAgent:
@@ -52,7 +54,7 @@ class CodeReviewAgent:
             "git-tools": git_server,
             "complexity-tools": complexity_server,
             "security-linter": linter_server,
-            "yunxiao": YUNXIAO_MCP_CONFIG,  # 真实云效 MCP Server
+            "yunxiao": _get_yunxiao_mcp_config(),  # 延迟读取环境变量
         }
         self.hooks = custom_hooks or get_hooks_config()
         self._results: list[dict[str, Any]] = []
