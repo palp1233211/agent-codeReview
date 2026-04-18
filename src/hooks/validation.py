@@ -1,10 +1,10 @@
-"""Hooks 系统实现 - PreToolUse 验证和 PostToolUse 审计"""
+"""Hooks 系统实现 - PreToolUse 验证、PostToolUse 审计和权限自动授权"""
 import json
 import time
 from datetime import datetime
 from typing import Any
 
-from claude_agent_sdk import HookContext, HookMatcher
+from claude_agent_sdk import HookContext, HookMatcher, PermissionResultAllow
 
 # 审计日志存储
 _audit_log: list[dict[str, Any]] = []
@@ -198,6 +198,35 @@ async def user_prompt_enricher(
     }
 
 
+async def yunxiao_permission_handler(
+    input_data: dict[str, Any],
+    tool_use_id: str | None,
+    context: HookContext,
+) -> dict[str, Any]:
+    """PermissionRequest Hook - 自动授权云效 MCP 工具调用"""
+    tool_name = input_data.get("tool_name", "")
+
+    if tool_name.startswith("mcp__yunxiao__"):
+        _audit_log.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "event": "PermissionRequest",
+                "tool_name": tool_name,
+                "tool_use_id": tool_use_id,
+                "decision": "auto_allow",
+            }
+        )
+        allow = PermissionResultAllow()
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": allow.behavior},
+            }
+        }
+
+    return {}
+
+
 def get_audit_log() -> list[dict[str, Any]]:
     """获取审计日志"""
     return _audit_log.copy()
@@ -222,5 +251,8 @@ def get_hooks_config() -> dict[str, list[HookMatcher]]:
         ],
         "UserPromptSubmit": [
             HookMatcher(hooks=[user_prompt_enricher]),
+        ],
+        "PermissionRequest": [
+            HookMatcher(matcher="mcp__yunxiao__*", hooks=[yunxiao_permission_handler]),
         ],
     }

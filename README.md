@@ -68,6 +68,41 @@ python run.py
 uvicorn src.main:app --reload
 ```
 
+## 服务器部署
+
+服务器上 `venv/` 目录不存在是正常的（被 `.gitignore` 排除）。按以下步骤部署：
+
+```bash
+# 1. 克隆代码
+git clone <repo_url>
+cd my-agent
+
+# 2. 创建虚拟环境并安装依赖
+python3 -m venv venv
+source venv/bin/activate  # Linux/macOS
+pip install -r requirements.txt
+
+# 3. 配置环境变量
+cp .env.example .env
+vim .env  # 配置 API Key、云效 Token 等
+
+# 4. 运行方式选择
+
+# 方式 A - CLI 直接运行
+python cli.py yunxiao-mr -r 3865544 -m 968 --business default
+
+# 方式 B - 启动 API 服务
+uvicorn src.main:app --host 0.0.0.0 --port 8000
+
+# 方式 C - 后台服务（推荐生产环境）
+nohup uvicorn src.main:app --host 0.0.0.0 --port 8000 > app.log 2>&1 &
+```
+
+**生产环境建议**：
+- 使用 systemd 或 supervisor 管理 uvicorn 服务进程
+- 配置 Nginx 反向代理（HTTPS、负载均衡）
+- 日志输出到 `/var/log/my-agent/` 目录
+
 ## API 使用
 
 ### 通用审查接口
