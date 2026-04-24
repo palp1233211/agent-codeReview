@@ -95,20 +95,15 @@ class CodeReviewAgent:
         dimensions: list[str] | None = None,
         permission_mode: str = "bypassPermissions",  # 自动授权（非 root 用户可用）
     ) -> ClaudeAgentOptions:
-        """获取包含云效工具的 Agent 配置。
+        """获取包含云效工具的 Agent 配置（单层，直接调用 yunxiao MCP）。
 
-        架构说明：
-        - Claude Code 会话：subagent 通过父会话访问全局 yunxiao MCP（不传 mcp_servers）
-        - CLI/API 独立进程：必须显式传 mcp_servers，否则子进程无法访问云效工具
-        - 注意：bypassPermissions 不能以 root 运行，需用普通用户
+        注意：bypassPermissions 不能以 root 运行，需用普通用户。
         """
         return ClaudeAgentOptions(
-            allowed_tools=["Agent"],
+            allowed_tools=list(YUNXIAO_MR_AGENT.tools),
             permission_mode=permission_mode,
             hooks=self.hooks,
-            agents={"yunxiao-mr-reviewer": YUNXIAO_MR_AGENT},
-            # CLI/API 独立进程必须传 mcp_servers
-            mcp_servers=self.mcp_servers,
+            mcp_servers={"yunxiao": _get_yunxiao_mcp_config()},
         )
 
     async def review_git_diff(
@@ -210,16 +205,19 @@ class CodeReviewAgent:
             else "生成审查报告，不需要在 MR 上添加评论（no_comment 模式）。"
         )
 
-        prompt = f"""请调用 yunxiao-mr-reviewer subagent 对云效 MR 进行全面代码审查。
+        # 单层直调：把 subagent 的系统提示词拼进主 prompt，省掉 Agent 调度一层
+        prompt = f"""{YUNXIAO_MR_AGENT.prompt}
 
-MR 信息:
+---
+
+本次任务 MR 信息:
 - organizationId: {organization_id}
 - repositoryId: {repository_id}
 - localId: {local_id}
 
 要求: {comment_instruction}
 
-subagent 完成后，请用中文输出审查摘要。"""
+完成后请用中文输出审查摘要。"""
 
         options = self._get_options_with_yunxiao(dimensions)
         result = await self._run_query(prompt, options)

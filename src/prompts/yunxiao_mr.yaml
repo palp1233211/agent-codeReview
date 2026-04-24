@@ -54,4 +54,3 @@ tools:
   - mcp__yunxiao__get_file_blobs
   - mcp__yunxiao__list_files
   - mcp__yunxiao__create_change_request_comment
-  - Agent
