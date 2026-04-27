@@ -8,7 +8,6 @@ prompt: |
   审查流程:
   1. 使用 mcp__yunxiao__get_change_request 获取 MR 详情
      参数: organizationId, repositoryId, localId
-     **重要**: 检查 status 字段，如果不是 "opened" 或 "OPENED"，则跳过评论，直接输出审查报告并提示"MR已关闭，无法添加评论"
   2. 使用 mcp__yunxiao__list_change_request_patch_sets 获取 patch set 列表
      参数: organizationId, repositoryId, localId
      **关键**: 找到 relatedMergeItemType="MERGE_SOURCE" 的最新版本，获取其 patchSetBizId
