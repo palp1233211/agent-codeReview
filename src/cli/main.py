@@ -81,6 +81,18 @@ async def cmd_yunxiao_mr(
     print(summary[:800] + "..." if len(summary) > 800 else summary)
 
 
+async def cmd_bi_weekly_doc(date_str: str | None = None) -> None:
+    """创建 BI 双周迭代上线文档套件"""
+    from src.agents.bi_weekly_doc import run_bi_weekly_doc
+
+    print("\n🚀 开始创建 BI 双周迭代文档...")
+    result = await run_bi_weekly_doc(date_str=date_str)
+    print(f"   日期: {result.get('date')}")
+    print("\n📝 执行结果:")
+    print("-" * 40)
+    print(result.get("summary", "（无输出）"))
+
+
 async def cmd_files(file_paths: list[str], dimensions: list[str] | None) -> None:
     """审查本地文件"""
     from src.agents.reviewer import CodeReviewAgent
@@ -111,8 +123,6 @@ async def cmd_diff(base: str, target: str, dimensions: list[str] | None) -> None
 
 
 def main():
-    _check_env()
-
     parser = argparse.ArgumentParser(
         description="Code Review CLI - 基于 Claude Agent SDK",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -136,6 +146,10 @@ def main():
     )
 
     subparsers = parser.add_subparsers(dest="command")
+
+    # bi-weekly-doc
+    p = subparsers.add_parser("bi-weekly-doc", help="创建 BI 双周迭代上线文档套件（汇总 + 泰国 + 菲律宾）")
+    p.add_argument("--date", default=None, help="指定日期，格式 YYYYMMDD（默认取本周四）")
 
     # yunxiao-mr
     p = subparsers.add_parser("yunxiao-mr", help="审查云效 MR")
@@ -167,6 +181,11 @@ def main():
 
     args = parser.parse_args()
 
+    if args.command == "bi-weekly-doc":
+        asyncio.run(cmd_bi_weekly_doc(date_str=args.date))
+        return
+
+    _check_env()
     print("=" * 50)
     print("🔍 Claude Agent Code Review")
     print("=" * 50)
