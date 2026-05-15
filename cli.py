@@ -2,6 +2,8 @@
 """CLI 入口脚本"""
 import sys
 import os
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

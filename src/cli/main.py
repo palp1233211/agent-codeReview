@@ -87,10 +87,10 @@ async def cmd_bi_weekly_doc(date_str: str | None = None) -> None:
 
     print("\n🚀 开始创建 BI 双周迭代文档...")
     result = await run_bi_weekly_doc(date_str=date_str)
-    print(f"   日期: {result.get('date')}")
-    print("\n📝 执行结果:")
-    print("-" * 40)
-    print(result.get("summary", "（无输出）"))
+    print(f"\n✅ 完成！日期：{result['date']}")
+    print(f"\n  汇总文档：{result['summary_url']}")
+    print(f"  泰国文档：{result['thai_url']}")
+    print(f"  菲律宾文档：{result['ph_url']}")
 
 
 async def cmd_files(file_paths: list[str], dimensions: list[str] | None) -> None:
