@@ -6,7 +6,7 @@ from typing import Any
 from ..lark.client import LarkClient, encode_url
 
 # 固定配置
-FOLDER_TOKEN = "BQ4ifcdM1lUjJidpg83cIWlJnKf"
+FOLDER_TOKEN = "UrcNfhwkalLeaKd1GRqcfKcSnvh"
 SUMMARY_TEMPLATE = "Nzoxd1LrPoCwQaxFOAdcXMm4nMh"
 COUNTRY_TEMPLATE = "Ou8tdObXMolH8VxQ0yzcd5K6nQh"
 CHAT_ID = "oc_02b6d626dd23a36c13ab1e3c6d80d21f"
