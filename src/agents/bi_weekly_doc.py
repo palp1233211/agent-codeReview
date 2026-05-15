@@ -9,7 +9,7 @@ from ..lark.client import LarkClient, encode_url
 FOLDER_TOKEN = "BQ4ifcdM1lUjJidpg83cIWlJnKf"
 SUMMARY_TEMPLATE = "Nzoxd1LrPoCwQaxFOAdcXMm4nMh"
 COUNTRY_TEMPLATE = "Ou8tdObXMolH8VxQ0yzcd5K6nQh"
-CHAT_ID = "oc_7ff28089a62b19bf781ca9fa2ac3275d"
+CHAT_ID = "oc_02b6d626dd23a36c13ab1e3c6d80d21f"
 MENTION_USER_ID = "ou_59c70b3948d557b0edbf258050241b21"
 FEISHU_DOCX_BASE = "https://flashexpress.feishu.cn/docx"
 
