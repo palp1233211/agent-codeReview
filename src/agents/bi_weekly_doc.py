@@ -9,7 +9,7 @@ from ..lark.client import LarkClient, encode_url
 FOLDER_TOKEN = "BQ4ifcdM1lUjJidpg83cIWlJnKf"
 SUMMARY_TEMPLATE = "Nzoxd1LrPoCwQaxFOAdcXMm4nMh"
 COUNTRY_TEMPLATE = "Ou8tdObXMolH8VxQ0yzcd5K6nQh"
-CHAT_ID = "oc_02b6d626dd23a36c13ab1e3c6d80d21f"
+CHAT_ID = "oc_7ff28089a62b19bf781ca9fa2ac3275d"
 MENTION_USER_ID = "ou_59c70b3948d557b0edbf258050241b21"
 FEISHU_DOCX_BASE = "https://flashexpress.feishu.cn/docx"
 
@@ -192,7 +192,7 @@ async def run_bi_weekly_doc(date_str: str | None = None) -> dict[str, Any]:
     summary_url = f"{FEISHU_DOCX_BASE}/{summary_token}"
 
     # 步骤 6：发送飞书群消息（暂时注释，确认流程正确后再开启）
-    # await asyncio.to_thread(client.send_text_message, CHAT_ID, summary_url)
+    await asyncio.to_thread(client.send_text_message, CHAT_ID, summary_url)
 
     return {
         "date": date_str,
