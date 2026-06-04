@@ -1,6 +1,12 @@
 """Code Review Agent 核心实现"""
 import os
+import sys
 from typing import Any
+
+
+def _stderr_logger(line: str) -> None:
+    """打印 claude CLI 子进程 stderr，便于排查认证/启动错误。"""
+    print(f"[claude-cli-stderr] {line}", file=sys.stderr, flush=True)
 
 from claude_agent_sdk import (
     query,
@@ -104,6 +110,7 @@ class CodeReviewAgent:
             permission_mode=permission_mode,
             hooks=self.hooks,
             mcp_servers={"yunxiao": _get_yunxiao_mcp_config()},
+            stderr=_stderr_logger,
         )
 
     async def review_git_diff(

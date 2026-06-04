@@ -260,9 +260,9 @@ custom_prompt: |
 使用方式：
 ```bash
 # CLI
-python cli.py yunxiao-mr -r 2835387 -m 42 --business mobile
+python cli.py yunxiao-mr -r 3865544 -m 42 --business mobile
 
 # API
 curl -X POST http://localhost:8000/review/yunxiao-mr \
-  -d '{"repository_id": "2835387", "local_id": "42", "business_type": "mobile"}'
+  -d '{"repository_id": "3865544", "local_id": "42", "business_type": "mobile"}'
 ```
