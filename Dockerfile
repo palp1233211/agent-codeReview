@@ -1,6 +1,8 @@
 # 官方预构建镜像：Python 3.11 + Node 22
 # Node 必须 >= 22，@anthropic-ai/claude-code 的 engines 要求
-FROM nikolaik/python-nodejs:python3.11-nodejs22
+# 必须用 bullseye(Debian 11/glibc 2.31)：bookworm 的 glibc 2.36 走 clone3 系统调用，
+# 会被 Docker < 20.10.10 的旧 libseccomp 拦成 EPERM，导致 Node 无法创建线程直接 abort
+FROM nikolaik/python-nodejs:python3.11-nodejs22-bullseye
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 \
