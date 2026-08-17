@@ -31,6 +31,14 @@ class LarkClient:
             app_secret=os.environ["LARK_APP_SECRET"],
         )
 
+    @property
+    def app_id(self) -> str:
+        return self._app_id
+
+    @property
+    def app_secret(self) -> str:
+        return self._app_secret
+
     def _get_token(self) -> str:
         resp = requests.post(
             f"{FEISHU_API}/auth/v3/tenant_access_token/internal",

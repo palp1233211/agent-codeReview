@@ -81,6 +81,14 @@ async def cmd_yunxiao_mr(
     print(summary[:800] + "..." if len(summary) > 800 else summary)
 
 
+def cmd_lark_bot() -> int:
+    """启动飞书机器人长连接（WebSocket 模式），阻塞运行直到被中断"""
+    from src.lark.ws_bot import run_ws_bot
+
+    print("\n🤖 启动飞书长连接机器人...")
+    return run_ws_bot()
+
+
 async def cmd_bi_weekly_doc(date_str: str | None = None) -> None:
     """创建 BI 双周迭代上线文档套件"""
     from src.agents.bi_weekly_doc import run_bi_weekly_doc
@@ -142,6 +150,9 @@ def main():
 
   # 审查 Git diff
   python cli.py diff -b main -t feature
+
+  # 启动飞书长连接机器人
+  python cli.py lark-bot
 """,
     )
 
@@ -150,6 +161,9 @@ def main():
     # bi-weekly-doc
     p = subparsers.add_parser("bi-weekly-doc", help="创建 BI 双周迭代上线文档套件（汇总 + 泰国 + 菲律宾）")
     p.add_argument("--date", default=None, help="指定日期，格式 YYYYMMDD（默认取本周四）")
+
+    # lark-bot
+    subparsers.add_parser("lark-bot", help="启动飞书机器人长连接（WebSocket 模式）")
 
     # yunxiao-mr
     p = subparsers.add_parser("yunxiao-mr", help="审查云效 MR")
@@ -184,6 +198,9 @@ def main():
     if args.command == "bi-weekly-doc":
         asyncio.run(cmd_bi_weekly_doc(date_str=args.date))
         return
+
+    if args.command == "lark-bot":
+        sys.exit(cmd_lark_bot())
 
     _check_env()
     print("=" * 50)
