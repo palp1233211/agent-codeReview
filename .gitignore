@@ -38,6 +38,7 @@ wheels/
 .coverage
 htmlcov/
 .tox/
+/tests/*
 
 # Logs
 *.log
