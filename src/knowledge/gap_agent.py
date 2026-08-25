@@ -195,9 +195,14 @@ class GapFiller:
             max_turns=int(os.environ.get("KB_MAX_TURNS", _DEFAULT_MAX_TURNS)),
         )
 
-    def fill(self, gap: Any, *, chat_id: str) -> None:
-        """查证一条知识盲区并写入本地文档；查不出则标 needs_human。"""
-        raw = self._run_agent(self._build_prompt(gap))
+    def fill(self, gap: Any, *, chat_id: str, hint: str = "") -> None:
+        """查证一条知识盲区并写入本地文档；查不出则标 needs_human。
+
+        `hint` 是用户在 `/kb fill <编号> <文本>` 里额外给的线索（通常是涉及的
+        项目名/方法名），原样并入 prompt——FBI_REPO_PATH 下可能挂了不止一个
+        项目子目录，agent 光凭问题原文猜不出该进哪个目录时就靠它定位。
+        """
+        raw = self._run_agent(self._build_prompt(gap, hint=hint))
 
         try:
             result = parse_agent_output(raw)
@@ -229,7 +234,7 @@ class GapFiller:
 
     # ---------- 内部 ----------
 
-    def _build_prompt(self, gap: Any) -> str:
+    def _build_prompt(self, gap: Any, *, hint: str = "") -> str:
         lines = [
             "## 本次要查证的问题",
             "",
@@ -237,6 +242,8 @@ class GapFiller:
         ]
         if gap.task_name:
             lines.append(f"Chatflow 识别的菜单/任务：{gap.task_name}")
+        if hint:
+            lines.append(f"人工补充线索（涉及的项目/方法，优先按此定位）：{hint}")
         lines += [
             "",
             f"代码库根目录：{self._repo_path}（已是当前工作目录）",

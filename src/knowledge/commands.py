@@ -16,7 +16,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_COMMAND_RE = re.compile(r"^/kb(?:\s+(\S+))?(?:\s+(\S+))?\s*$", re.IGNORECASE)
+_COMMAND_PREFIX_RE = re.compile(r"^/kb(?:\s|$)", re.IGNORECASE)
 _ACTIONS_WITH_ID = {"fill", "approve", "sync", "delete"}
 _ACTIONS = {"list", "help", *_ACTIONS_WITH_ID}
 # 处理中的行有后台线程在跑，删掉会导致它写完文档/落库时找不到行——等它跑完再删
@@ -25,7 +25,10 @@ _UNDELETABLE_STATUSES = {"filling", "syncing"}
 _USAGE = (
     "知识盲区队列指令：\n"
     "• `/kb list` — 看待补全的问题\n"
-    "• `/kb fill <编号>` — 让我去代码库查证并补充知识（慢，完成后会在群里通知）\n"
+    "• `/kb fill <编号> [涉及的项目/方法说明]` — 让我去代码库查证并补充知识"
+    "（慢，完成后会在群里通知）。FBI_REPO_PATH 下可能有多个项目子目录，"
+    "拿不准该查哪个项目、哪个方法时，把线索写在编号后面，例如："
+    "`/kb fill 12 fbi 项目 PunishBLL::getList`\n"
     "• `/kb approve <编号>` — 确认草稿无误，推送到 Dify 知识库\n"
     "• `/kb sync <编号>` — 推送失败后重试\n"
     "• `/kb delete <编号>` — 从队列中删除（只删本地记录，已推送到 Dify 的内容不会被撤回）"
@@ -36,24 +39,36 @@ _USAGE = (
 class KbCommand:
     action: str
     gap_id: int | None
+    hint: str = ""
 
 
 def parse_command(text: str) -> KbCommand | None:
-    """解析 /kb 指令；不是 /kb 开头返回 None（放行给 Dify）。"""
+    """解析 /kb 指令；不是 /kb 开头返回 None（放行给 Dify）。
+
+    `fill` 之后除了编号，还可以跟一段自由文本（涉及的项目名/方法名），
+    原样透传给补全 agent 当提示——FBI_REPO_PATH 下可能挂了不止一个项目，
+    agent 自己猜不出该进哪个子目录时就靠这段文本定位。
+    """
     if not text:
         return None
 
-    matched = _COMMAND_RE.match(text.strip())
-    if not matched:
+    stripped = text.strip()
+    if not _COMMAND_PREFIX_RE.match(stripped):
         return None
 
-    action = (matched.group(1) or "help").lower()
+    tokens = stripped.split(maxsplit=3)
+    action = (tokens[1].lower() if len(tokens) >= 2 else "help")
     if action not in _ACTIONS:
         return KbCommand(action="help", gap_id=None)
 
-    raw_id = matched.group(2)
-    gap_id = int(raw_id) if raw_id and raw_id.isdigit() else None
-    return KbCommand(action=action, gap_id=gap_id)
+    gap_id = None
+    hint = ""
+    if len(tokens) >= 3 and tokens[2].isdigit():
+        gap_id = int(tokens[2])
+        if len(tokens) == 4:
+            hint = tokens[3].strip()
+
+    return KbCommand(action=action, gap_id=gap_id, hint=hint)
 
 
 def _spawn_daemon(fn: Callable[[], None]) -> None:
@@ -88,7 +103,9 @@ class KbCommands:
         if command.action == "list":
             return self._handle_list()
         if command.action == "fill":
-            return self._handle_fill(command.gap_id, chat_id=chat_id, user_id=user_id)
+            return self._handle_fill(
+                command.gap_id, chat_id=chat_id, user_id=user_id, hint=command.hint
+            )
         if command.action in ("approve", "sync"):
             return self._handle_sync(
                 command.gap_id, chat_id=chat_id, user_id=user_id, action=command.action
@@ -129,9 +146,11 @@ class KbCommands:
 
         return "\n".join(lines)
 
-    def _handle_fill(self, gap_id: int | None, *, chat_id: str, user_id: str) -> str:
+    def _handle_fill(
+        self, gap_id: int | None, *, chat_id: str, user_id: str, hint: str = ""
+    ) -> str:
         if gap_id is None:
-            return f"缺少编号。用法：`/kb fill <编号>`\n\n{_USAGE}"
+            return f"缺少编号。用法：`/kb fill <编号> [涉及的项目/方法说明]`\n\n{_USAGE}"
 
         gap = self._gap_store.get(gap_id)
         if gap is None:
@@ -142,8 +161,9 @@ class KbCommands:
         ):
             return f"#{gap_id} 已经在处理或已处理过了（当前状态：{gap.status}）。"
 
-        self._executor(lambda: self._run_fill(gap, chat_id=chat_id))
-        return f"已开始查证 #{gap_id}：{gap.original_query}\n查完会在群里告诉你结果。"
+        self._executor(lambda: self._run_fill(gap, chat_id=chat_id, hint=hint))
+        extra = f"\n已收到线索：{hint}" if hint else ""
+        return f"已开始查证 #{gap_id}：{gap.original_query}{extra}\n查完会在群里告诉你结果。"
 
     def _handle_sync(
         self, gap_id: int | None, *, chat_id: str, user_id: str, action: str
@@ -186,10 +206,10 @@ class KbCommands:
 
     # ---------- 后台执行 ----------
 
-    def _run_fill(self, gap: Any, *, chat_id: str) -> None:
+    def _run_fill(self, gap: Any, *, chat_id: str, hint: str = "") -> None:
         with self._fill_slots:
             try:
-                self._fill_gap(gap, chat_id=chat_id)
+                self._fill_gap(gap, chat_id=chat_id, hint=hint)
             except Exception:
                 # 后台线程里的异常没人接，必须自己兜住并落库，否则条目会永远卡在 filling
                 logger.exception("补全知识失败: gap_id=%s", gap.id)
