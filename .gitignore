@@ -43,3 +43,4 @@ htmlcov/
 # Logs
 *.log
 logs/
+/knowledge/*
