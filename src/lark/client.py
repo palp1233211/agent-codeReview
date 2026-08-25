@@ -103,6 +103,14 @@ class LarkClient:
         if data.get("code") != 0:
             raise RuntimeError(f"batch_update_blocks failed [{data.get('code')}]: {data.get('msg')}")
 
+    def get_bot_open_id(self) -> str:
+        resp = requests.get(f"{FEISHU_API}/bot/v3/info", headers=self._headers())
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"get_bot_open_id failed [{data.get('code')}]: {data.get('msg')}")
+        return data["bot"]["open_id"]
+
     def send_text_message(self, chat_id: str, text: str) -> None:
         req = (
             CreateMessageRequest.builder()

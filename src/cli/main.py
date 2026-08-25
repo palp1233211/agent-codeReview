@@ -89,6 +89,67 @@ def cmd_lark_bot() -> int:
     return run_ws_bot()
 
 
+def cmd_kb_doctor() -> int:
+    """检查知识盲区流水线的运行前提（路径 / 密钥 / 数据表）"""
+    from src.knowledge.doctor import format_report, run_checks
+
+    print("\n🩺 知识盲区流水线就绪检查\n")
+    report, ok = format_report(run_checks())
+    print(report)
+    print("\n" + ("✅ 全部就绪" if ok else "❌ 有阻塞项，修好再跑 lark-bot"))
+    return 0 if ok else 1
+
+
+def cmd_kb_import(dry_run: bool) -> int:
+    """接管 Dify 知识库里已存在的文档：拉回本地 + 登记索引 + 建立映射"""
+    import os
+
+    from src.dify.dataset_client import DifyDatasetClient
+    from src.knowledge.docs_repo import DocsRepo
+    from src.knowledge.importer import DocumentImporter, fetch_document_text
+    from src.storage.kb_document_store import KbDocumentStore
+
+    try:
+        dataset_client = DifyDatasetClient.from_env()
+        docs_repo = DocsRepo.from_env()
+        doc_store = KbDocumentStore.from_env()
+    except (KeyError, ValueError) as exc:
+        print(f"\n❌ 配置不完整：{exc}")
+        return 1
+
+    base_url = os.environ.get("DIFY_BASE_URL", "http://localhost/v1")
+    api_key = os.environ["DIFY_DATASET_API_KEY"]
+
+    importer = DocumentImporter(
+        docs_repo=docs_repo,
+        doc_store=doc_store,
+        dataset_client=dataset_client,
+        fetch_text=lambda document_id: fetch_document_text(
+            base_url=base_url,
+            api_key=api_key,
+            dataset_id=dataset_client.dataset_id,
+            document_id=document_id,
+        ),
+    )
+
+    print(f"\n📥 {'试运行（不写任何东西）' if dry_run else '开始接管'} Dify 已有文档...")
+    imported = importer.import_all(dry_run=dry_run)
+
+    if not imported:
+        print("没有需要接管的文档（可能都已接管过）。")
+        return 0
+
+    for doc in imported:
+        print(f"  ✅ {doc.dify_document_name}")
+        print(f"     -> {doc.doc_path}（{doc.segments} 段）")
+
+    if dry_run:
+        print(f"\n共 {len(imported)} 篇待接管。去掉 --dry-run 真正执行。")
+    else:
+        print(f"\n共接管 {len(imported)} 篇。请检查本地文件内容是否完整后再做同步。")
+    return 0
+
+
 async def cmd_bi_weekly_doc(date_str: str | None = None) -> None:
     """创建 BI 双周迭代上线文档套件"""
     from src.agents.bi_weekly_doc import run_bi_weekly_doc
@@ -153,6 +214,9 @@ def main():
 
   # 启动飞书长连接机器人
   python cli.py lark-bot
+
+  # 接管 Dify 里已有的知识文档（先 --dry-run 看看会动哪些）
+  python cli.py kb-import --dry-run
 """,
     )
 
@@ -164,6 +228,13 @@ def main():
 
     # lark-bot
     subparsers.add_parser("lark-bot", help="启动飞书机器人长连接（WebSocket 模式）")
+
+    # kb-doctor
+    subparsers.add_parser("kb-doctor", help="检查知识盲区流水线的运行前提")
+
+    # kb-import
+    p = subparsers.add_parser("kb-import", help="接管 Dify 知识库里已存在的文档到本地")
+    p.add_argument("--dry-run", action="store_true", help="只看会接管哪些，不写任何东西")
 
     # yunxiao-mr
     p = subparsers.add_parser("yunxiao-mr", help="审查云效 MR")
@@ -201,6 +272,12 @@ def main():
 
     if args.command == "lark-bot":
         sys.exit(cmd_lark_bot())
+
+    if args.command == "kb-doctor":
+        sys.exit(cmd_kb_doctor())
+
+    if args.command == "kb-import":
+        sys.exit(cmd_kb_import(dry_run=args.dry_run))
 
     _check_env()
     print("=" * 50)
