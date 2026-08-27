@@ -1,6 +1,7 @@
 """Code Review Agent 核心实现"""
 import os
 from typing import Any
+from urllib.parse import quote, unquote, urlparse
 
 from .runtime import RuntimeOptions, create_agent_runtime
 from .. import tools as _tools  # noqa: F401 - importing registers local tools
@@ -24,6 +25,7 @@ def _get_yunxiao_mcp_config() -> dict[str, Any]:
     token = os.getenv("YUNXIAO_ACCESS_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    headers["X-Devops-Toolsets"] = "code-management"
     config: dict[str, Any] = {
         "type": "mcp",
         "server_label": "yunxiao",
@@ -42,8 +44,30 @@ def _get_yunxiao_claude_mcp_config() -> dict[str, Any]:
         "args": ["-y", "alibabacloud-devops-mcp-server"],
         "env": {
             "YUNXIAO_ACCESS_TOKEN": os.getenv("YUNXIAO_ACCESS_TOKEN", ""),
+            "DEVOPS_TOOLSETS": "code-management",
         },
     }
+
+
+def _normalize_yunxiao_repository_id(repository_id: str) -> str:
+    """Normalize Yunxiao repository id/path for the DevOps MCP server."""
+    value = repository_id.strip()
+    if not value:
+        return value
+
+    if value.startswith(("http://", "https://")):
+        path_parts = [part for part in urlparse(value).path.split("/") if part]
+        if "change" in path_parts:
+            path_parts = path_parts[: path_parts.index("change")]
+        value = "/".join(path_parts)
+
+    if value.isdigit():
+        return value
+    if "%2f" in value.lower():
+        return value
+    if "/" in value:
+        return quote(unquote(value), safe="")
+    return value
 
 
 class CodeReviewAgent:
@@ -68,17 +92,16 @@ class CodeReviewAgent:
     def _get_options(
         self,
         dimensions: list[str] | None = None,
-        permission_mode: str = "default",
     ) -> RuntimeOptions:
         """获取 Agent 配置（不含云效工具）"""
         # 加载业务场景对应的 Agent 配置
         agents = load_business_agents(self.business_type)
+        allowed_agents = self._dimension_agent_names(dimensions)
 
         # 根据 dimensions 过滤
-        if dimensions is not None and "all" not in dimensions:
+        if allowed_agents:
             filtered_agents: dict[str, Any] = {}
-            for dim in dimensions:
-                agent_name = f"{dim}-reviewer"
+            for agent_name in allowed_agents:
                 if agent_name in agents:
                     filtered_agents[agent_name] = agents[agent_name]
             agents = filtered_agents
@@ -90,25 +113,9 @@ class CodeReviewAgent:
                 "analyze_complexity", "analyze_maintainability", "check_code_duplication",
                 "security_scan", "check_secrets", "lint_code",
             ],
+            allowed_agents=allowed_agents,
             hooks=self.hooks,
             agents=agents,
-        )
-
-    def _get_options_with_yunxiao(
-        self,
-        dimensions: list[str] | None = None,
-        permission_mode: str = "bypassPermissions",  # 自动授权（非 root 用户可用）
-    ) -> RuntimeOptions:
-        """获取包含云效工具的 Agent 配置（单层，直接调用 yunxiao MCP）。
-
-        注意：bypassPermissions 不能以 root 运行，需用普通用户。
-        """
-        mcp_config = _get_yunxiao_mcp_config()
-        return RuntimeOptions(
-            allowed_tools=list(YUNXIAO_MR_AGENT.tools),
-            hooks=self.hooks,
-            remote_mcp_servers=[mcp_config] if mcp_config else [],
-            claude_mcp_servers={"yunxiao": _get_yunxiao_claude_mcp_config()},
         )
 
     async def review_git_diff(
@@ -176,6 +183,7 @@ class CodeReviewAgent:
 
         options = RuntimeOptions(
             allowed_tools=["Agent"],
+            allowed_agents=["security-reviewer", "quality-reviewer"],
             hooks=self.hooks,
             agents={
                 "security-reviewer": load_agent_definition("security"),
@@ -203,10 +211,17 @@ class CodeReviewAgent:
             dimensions: 审查维度，None 表示全部
             auto_comment: 是否自动在 MR 上添加评论
         """
+        normalized_repository_id = _normalize_yunxiao_repository_id(repository_id)
+
         comment_instruction = (
             "审查完成后，将所有问题合并为唯一一条中文评论发布到 MR（commentType=GLOBAL_COMMENT，只调用 1 次）。"
             if auto_comment
             else "生成审查报告，不需要在 MR 上添加评论（no_comment 模式）。"
+        )
+        dimension_note = (
+            "当前只审查这些维度: " + ", ".join(dimensions)
+            if dimensions and "all" not in dimensions
+            else "当前审查全部维度。"
         )
 
         # 单层直调：把 subagent 的系统提示词拼进主 prompt，省掉 Agent 调度一层
@@ -216,25 +231,56 @@ class CodeReviewAgent:
 
 本次任务 MR 信息:
 - organizationId: {organization_id}
-- repositoryId: {repository_id}
+- repositoryId: {normalized_repository_id}
 - localId: {local_id}
+
+{dimension_note}
 
 要求: {comment_instruction}
 
 完成后请用中文输出审查摘要。"""
 
-        options = self._get_options_with_yunxiao(dimensions)
+        mcp_config = _get_yunxiao_mcp_config()
+        options = RuntimeOptions(
+            allowed_tools=list(YUNXIAO_MR_AGENT.tools),
+            allowed_agents=self._dimension_agent_names(dimensions)
+            or ["security-reviewer", "quality-reviewer", "performance-reviewer"],
+            hooks=self.hooks,
+            remote_mcp_servers=[mcp_config] if mcp_config else [],
+            claude_mcp_servers={"yunxiao": _get_yunxiao_claude_mcp_config()},
+            verbose=True,
+            progress_prefix="yunxiao-mr",
+            disallowed_tools=[
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "MultiEdit",
+                "Grep",
+                "Glob",
+                "LS",
+            ],
+        )
         result = await self._run_query(prompt, options)
         parsed = self._parse_review_result(result)
 
         parsed["metadata"] = {
-            "repository_id": repository_id,
+            "repository_id": normalized_repository_id,
+            "original_repository_id": repository_id,
             "local_id": local_id,
             "organization_id": organization_id,
             "auto_comment": auto_comment,
+            "dimensions": dimensions or ["all"],
+            "provider": (os.getenv("AGENT_PROVIDER") or os.getenv("AGENT_SDK") or "claude").lower(),
         }
 
         return parsed
+
+    @staticmethod
+    def _dimension_agent_names(dimensions: list[str] | None) -> list[str]:
+        if not dimensions or "all" in dimensions:
+            return []
+        return [f"{dim}-reviewer" for dim in dimensions]
 
     async def _run_query(
         self,
@@ -257,6 +303,15 @@ class CodeReviewAgent:
             None,
         )
 
+        result_type = None
+        is_error = False
+        if result_msg:
+            is_error = bool(result_msg.get("is_error"))
+            if is_error:
+                result_type = "error"
+            else:
+                result_type = result_msg.get("subtype")
+
         # 提取 assistant 最终输出（最后一条 assistant 消息）
         final_output = ""
         for msg in reversed(messages):
@@ -274,8 +329,8 @@ class CodeReviewAgent:
         return {
             "raw_messages": messages,
             "summary": final_output,
-            "result_type": "error" if result_msg and result_msg.get("is_error") else result_msg.get("subtype") if result_msg else None,
-            "is_error": bool(result_msg and result_msg.get("is_error")),
+            "result_type": result_type,
+            "is_error": is_error,
             "tools_used": tools_used,
         }
 

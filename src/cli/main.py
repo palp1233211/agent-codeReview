@@ -53,9 +53,10 @@ async def cmd_yunxiao_mr(
     business_type: str,
 ) -> None:
     """审查云效 MR，直接调用 CodeReviewAgent"""
-    from src.agents.reviewer import CodeReviewAgent
+    from src.agents.reviewer import CodeReviewAgent, _normalize_yunxiao_repository_id
 
     print(f"\n🚀 开始审查 MR #{local_id}（仓库: {repository_id}）")
+    print(f"   MCP仓库参数: {_normalize_yunxiao_repository_id(repository_id)}")
     print(f"   业务类型: {business_type}")
     print(f"   维度: {dimensions or 'all'}")
     print(f"   自动评论: {auto_comment}")
@@ -77,7 +78,10 @@ async def cmd_yunxiao_mr(
 
     # 统计实际工具调用
     tools_used = result.get("tools_used", [])
-    comment_calls = [t for t in tools_used if "create_change_request_comment" in t]
+    comment_calls = [
+        t for t in tools_used
+        if "comment_on_yunxiao_mr" in t or "create_change_request_comment" in t
+    ]
 
     print("=" * 50)
     print("✅ 审查完成")
@@ -93,7 +97,7 @@ async def cmd_yunxiao_mr(
     print("\n📝 审查摘要:")
     print("-" * 40)
     summary = result.get("summary", "（无摘要）")
-    print(summary[:800] + "..." if len(summary) > 800 else summary)
+    print(summary)
 
 
 def cmd_lark_bot() -> int:
@@ -253,7 +257,7 @@ def main():
 
     # yunxiao-mr
     p = subparsers.add_parser("yunxiao-mr", help="审查云效 MR")
-    p.add_argument("-r", "--repository", required=True, help="仓库ID")
+    p.add_argument("-r", "--repository", required=True, help="仓库数字ID、完整路径或 MR URL")
     p.add_argument("-m", "--mr-id", required=True, help="MR编号")
     p.add_argument("-o", "--organization", default=None, help="组织ID（默认读取 YUNXIAO_ORG_ID 环境变量）")
     p.add_argument("-d", "--dimensions", nargs="+",

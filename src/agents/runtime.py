@@ -27,12 +27,16 @@ class AgentSpec:
 class RuntimeOptions:
     allowed_tools: list[str] = field(default_factory=list)
     agents: dict[str, AgentSpec] = field(default_factory=dict)
+    allowed_agents: list[str] = field(default_factory=list)
     hooks: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     cwd: str | None = None
     max_turns: int = 20
     remote_mcp_servers: list[dict[str, Any]] = field(default_factory=list)
     claude_mcp_servers: dict[str, Any] = field(default_factory=dict)
     include_default_file_tools: bool = True
+    verbose: bool = False
+    progress_prefix: str = "agent"
+    disallowed_tools: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -75,6 +79,50 @@ def agent_tool(name: str, description: str, input_schema: dict[str, Any]):
 
 def get_registered_tool(name: str) -> ToolDefinition | None:
     return _TOOLS.get(name)
+
+
+def _progress(options: RuntimeOptions, message: str) -> None:
+    _progress_from_values(options.progress_prefix, options.verbose, message)
+
+
+def _progress_from_values(prefix: str, enabled: bool, message: str) -> None:
+    if enabled:
+        print(f"🔎 [{prefix}] {message}", flush=True)
+
+
+def _summarize_tool_args(args: dict[str, Any]) -> str:
+    if not args:
+        return ""
+    safe_keys = (
+        "organizationId",
+        "repositoryId",
+        "localId",
+        "from",
+        "to",
+        "filePath",
+        "ref",
+        "comment_type",
+        "subagent_type",
+    )
+    summary = {
+        key: args.get(key)
+        for key in safe_keys
+        if key in args and args.get(key) is not None
+    }
+    if "content" in args:
+        summary["content_len"] = len(str(args.get("content") or ""))
+    return json.dumps(summary or {"keys": sorted(args)}, ensure_ascii=False)
+
+
+def _summarize_tool_result(result: Any) -> str:
+    if isinstance(result, dict):
+        if result.get("error"):
+            return f"error={result.get('error')}"
+        text = result.get("content", [{}])[0].get("text") if isinstance(result.get("content"), list) else None
+        if text:
+            return f"text_len={len(str(text))}"
+        return f"keys={sorted(result)[:8]}"
+    return f"type={type(result).__name__}"
 
 
 def _safe_path(path: str, cwd: Path) -> Path:
@@ -195,8 +243,12 @@ class OpenAIAgentRuntime:
             if not allowed or name in allowed
         ]
         if options.agents and (not allowed or "Agent" in allowed):
-            tools.append(_openai_agent_tool_schema())
+            tools.append(_openai_agent_tool_schema(options.allowed_agents or sorted(options.agents)))
         tools.extend(options.remote_mcp_servers)
+        _progress(
+            options,
+            f"OpenAI Responses 启动，tools={len(tools)}，remote_mcp={len(options.remote_mcp_servers)}",
+        )
 
         system_parts = []
         if options.agents:
@@ -233,6 +285,7 @@ class OpenAIAgentRuntime:
                 elif item_type == "function_call":
                     tool_name = getattr(item, "name", "")
                     args = _loads_json(getattr(item, "arguments", "{}"))
+                    _progress(options, f"调用工具: {tool_name} {_summarize_tool_args(args)}")
                     messages.append({"type": "tool_use", "tool": tool_name, "input": args})
                     result = await self._call_tool(
                         tool_name,
@@ -241,6 +294,8 @@ class OpenAIAgentRuntime:
                         hooks=options.hooks,
                         agents=options.agents,
                         max_turns=options.max_turns,
+                        verbose=options.verbose,
+                        progress_prefix=options.progress_prefix,
                     )
                     tool_outputs.append(
                         {
@@ -253,6 +308,7 @@ class OpenAIAgentRuntime:
                     messages.append({"type": item_type, "tool": getattr(item, "name", None)})
 
             if not tool_outputs:
+                _progress(options, "OpenAI Responses 完成，未等待更多工具结果")
                 messages.append({"type": "result", "subtype": "success", "content": _response_text(response)})
                 return messages
 
@@ -281,7 +337,8 @@ class OpenAIAgentRuntime:
             if not allowed or name in allowed
         ]
         if options.agents and (not allowed or "Agent" in allowed):
-            tools.append({"type": "function", "function": _openai_agent_function_schema()})
+            tools.append({"type": "function", "function": _openai_agent_function_schema(options.allowed_agents or sorted(options.agents))})
+        _progress(options, f"OpenAI Chat Completions 启动，tools={len(tools)}")
 
         chat_messages: list[dict[str, Any]] = []
         if options.agents:
@@ -307,6 +364,7 @@ class OpenAIAgentRuntime:
 
             tool_calls = choice.tool_calls or []
             if not tool_calls:
+                _progress(options, "OpenAI Chat Completions 完成，未等待更多工具结果")
                 messages.append({"type": "result", "subtype": "success", "content": content})
                 return messages
 
@@ -314,6 +372,7 @@ class OpenAIAgentRuntime:
             for call in tool_calls:
                 tool_name = call.function.name
                 args = _loads_json(call.function.arguments)
+                _progress(options, f"调用工具: {tool_name} {_summarize_tool_args(args)}")
                 messages.append({"type": "tool_use", "tool": tool_name, "input": args})
                 result = await self._call_tool(
                     tool_name,
@@ -322,6 +381,8 @@ class OpenAIAgentRuntime:
                     hooks=options.hooks,
                     agents=options.agents,
                     max_turns=options.max_turns,
+                    verbose=options.verbose,
+                    progress_prefix=options.progress_prefix,
                 )
                 chat_messages.append(
                     {
@@ -343,12 +404,16 @@ class OpenAIAgentRuntime:
         hooks: dict[str, list[dict[str, Any]]] | None = None,
         agents: dict[str, AgentSpec] | None = None,
         max_turns: int = 20,
+        verbose: bool = False,
+        progress_prefix: str = "agent",
     ) -> Any:
         if name == "Agent":
+            _progress_from_values(progress_prefix, verbose, f"调用子 Agent: {_summarize_tool_args(args)}")
             return await self._call_subagent(args, cwd=cwd, hooks=hooks or {}, agents=agents or {}, max_turns=max_turns)
 
         definition = get_registered_tool(name)
         if definition is None:
+            _progress_from_values(progress_prefix, verbose, f"未知工具: {name}")
             return {"error": f"未知工具: {name}"}
 
         denied = await _run_pre_hooks(name, args, hooks or {})
@@ -363,9 +428,11 @@ class OpenAIAgentRuntime:
             result = definition.func(**args)
             if inspect.isawaitable(result):
                 result = await result
+            _progress_from_values(progress_prefix, verbose, f"工具完成: {name} {_summarize_tool_result(result)}")
             return result
         except Exception as exc:
             error = exc
+            _progress_from_values(progress_prefix, verbose, f"工具失败: {name} error={exc}")
             return {"error": str(exc)}
         finally:
             await _run_post_hooks(name, locals().get("result", {}), error, hooks or {})
@@ -392,14 +459,15 @@ class OpenAIAgentRuntime:
         spec = agents[agent_name]
         messages = await self.run(
             prompt,
-            RuntimeOptions(
-                allowed_tools=list(spec.tools),
-                agents={agent_name: spec},
-                hooks=hooks,
-                cwd=cwd,
-                max_turns=max(1, max_turns - 1),
-            ),
-        )
+                RuntimeOptions(
+                    allowed_tools=list(spec.tools),
+                    agents={agent_name: spec},
+                    allowed_agents=[agent_name],
+                    hooks=hooks,
+                    cwd=cwd,
+                    max_turns=max(1, max_turns - 1),
+                ),
+            )
         summary = ""
         for message in reversed(messages):
             if message.get("type") == "assistant":
@@ -416,14 +484,14 @@ def _loads_json(value: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _openai_agent_tool_schema() -> dict[str, Any]:
+def _openai_agent_tool_schema(allowed_agents: list[str]) -> dict[str, Any]:
     return {
         "type": "function",
-        **_openai_agent_function_schema(),
+        **_openai_agent_function_schema(allowed_agents),
     }
 
 
-def _openai_agent_function_schema() -> dict[str, Any]:
+def _openai_agent_function_schema(allowed_agents: list[str]) -> dict[str, Any]:
     return {
         "name": "Agent",
         "description": "Run a configured specialist subagent and return its findings.",
@@ -433,6 +501,7 @@ def _openai_agent_function_schema() -> dict[str, Any]:
                 "subagent_type": {
                     "type": "string",
                     "description": "Configured subagent name, for example security-reviewer.",
+                    "enum": allowed_agents,
                 },
                 "prompt": {
                     "type": "string",
@@ -511,6 +580,8 @@ class ClaudeAgentRuntime:
             AgentDefinition,
             AssistantMessage,
             ClaudeAgentOptions,
+            PermissionResultAllow,
+            PermissionResultDeny,
             ResultMessage,
             TextBlock,
             ToolUseBlock,
@@ -546,8 +617,27 @@ class ClaudeAgentRuntime:
                 tools=local_tools,
             )
 
+        async def can_use_tool(tool_name: str, tool_input: dict[str, Any], _context: Any):
+            if options.allowed_tools and tool_name not in options.allowed_tools:
+                _progress(
+                    options,
+                    f"拒绝非白名单工具: {tool_name} {_summarize_tool_args(tool_input)}",
+                )
+                return PermissionResultDeny(
+                    message=f"Tool {tool_name} is not allowed for this run.",
+                    interrupt=False,
+                )
+            return PermissionResultAllow()
+
+        _progress(
+            options,
+            f"Claude SDK 启动，allowed_tools={len(options.allowed_tools)}，mcp_servers={', '.join(sorted(mcp_servers)) or 'none'}",
+        )
+
         claude_options = ClaudeAgentOptions(
+            tools=options.allowed_tools or None,
             allowed_tools=options.allowed_tools,
+            disallowed_tools=options.disallowed_tools,
             permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions"),
             hooks=options.hooks,
             agents=agents,
@@ -557,10 +647,20 @@ class ClaudeAgentRuntime:
             env=clean_claude_env(),
             debug_stderr=_NullWriter(),
             stderr=_stderr_logger,
+            can_use_tool=can_use_tool,
+            setting_sources=[],
         )
 
+        async def prompt_stream():
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": prompt},
+                "parent_tool_use_id": None,
+                "session_id": "default",
+            }
+
         try:
-            async for message in query(prompt=prompt, options=claude_options):
+            async for message in query(prompt=prompt_stream(), options=claude_options):
                 if isinstance(message, AssistantMessage):
                     text_parts = []
                     tool_uses = []
@@ -568,6 +668,7 @@ class ClaudeAgentRuntime:
                         if isinstance(block, TextBlock):
                             text_parts.append(block.text)
                         elif isinstance(block, ToolUseBlock):
+                            _progress(options, f"调用工具: {block.name} {_summarize_tool_args(block.input)}")
                             tool_uses.append(
                                 {
                                     "type": "tool_use",
@@ -580,6 +681,10 @@ class ClaudeAgentRuntime:
                         messages.append({"type": "assistant", "content": text_parts})
                     messages.extend(tool_uses)
                 elif isinstance(message, ResultMessage):
+                    _progress(
+                        options,
+                        f"Claude SDK 完成，subtype={message.subtype}，is_error={getattr(message, 'is_error', False)}",
+                    )
                     messages.append(
                         {
                             "type": "result",
