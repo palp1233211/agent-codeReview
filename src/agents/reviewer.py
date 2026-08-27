@@ -1,24 +1,10 @@
 """Code Review Agent 核心实现"""
 import os
-import sys
 from typing import Any
 
-
-def _stderr_logger(line: str) -> None:
-    """打印 claude CLI 子进程 stderr，便于排查认证/启动错误。"""
-    print(f"[claude-cli-stderr] {line}", file=sys.stderr, flush=True)
-
-from claude_agent_sdk import (
-    query,
-    ClaudeAgentOptions,
-    AssistantMessage,
-    ResultMessage,
-    TextBlock,
-    ToolUseBlock,
-)
-
+from .runtime import RuntimeOptions, create_agent_runtime
+from .. import tools as _tools  # noqa: F401 - importing registers local tools
 from ..hooks import get_hooks_config
-from ..tools import git_server, complexity_server, linter_server
 from ..prompts import (
     load_agent_definition,
     load_business_agents,
@@ -30,7 +16,27 @@ DEFAULT_ORG_ID = os.getenv("YUNXIAO_ORG_ID", "5ea86562f89c9700014a671f")
 
 
 def _get_yunxiao_mcp_config() -> dict[str, Any]:
-    """获取云效 MCP 配置（延迟读取环境变量）"""
+    """获取 OpenAI Responses API 的远程云效 MCP 配置。"""
+    server_url = os.getenv("YUNXIAO_MCP_URL")
+    if not server_url:
+        return {}
+    headers = {}
+    token = os.getenv("YUNXIAO_ACCESS_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    config: dict[str, Any] = {
+        "type": "mcp",
+        "server_label": "yunxiao",
+        "server_url": server_url,
+        "require_approval": "never",
+    }
+    if headers:
+        config["headers"] = headers
+    return config
+
+
+def _get_yunxiao_claude_mcp_config() -> dict[str, Any]:
+    """获取 Claude Agent SDK 的 stdio 云效 MCP 配置。"""
     return {
         "command": "npx",
         "args": ["-y", "alibabacloud-devops-mcp-server"],
@@ -55,21 +61,15 @@ class CodeReviewAgent:
             custom_hooks: 自定义 hooks 配置
         """
         self.business_type = business_type
-        # mcp_servers 为 dict 格式：key=server名, value=server配置或对象
-        self.mcp_servers = {
-            "git-tools": git_server,
-            "complexity-tools": complexity_server,
-            "security-linter": linter_server,
-            "yunxiao": _get_yunxiao_mcp_config(),  # 延迟读取环境变量
-        }
         self.hooks = custom_hooks or get_hooks_config()
+        self.runtime = create_agent_runtime()
         self._results: list[dict[str, Any]] = []
 
     def _get_options(
         self,
         dimensions: list[str] | None = None,
         permission_mode: str = "default",
-    ) -> ClaudeAgentOptions:
+    ) -> RuntimeOptions:
         """获取 Agent 配置（不含云效工具）"""
         # 加载业务场景对应的 Agent 配置
         agents = load_business_agents(self.business_type)
@@ -83,34 +83,32 @@ class CodeReviewAgent:
                     filtered_agents[agent_name] = agents[agent_name]
             agents = filtered_agents
 
-        return ClaudeAgentOptions(
+        return RuntimeOptions(
             allowed_tools=[
                 "Read", "Grep", "Glob", "Agent",
                 "get_git_diff", "get_file_content",
                 "analyze_complexity", "analyze_maintainability", "check_code_duplication",
                 "security_scan", "check_secrets", "lint_code",
             ],
-            permission_mode=permission_mode,
             hooks=self.hooks,
             agents=agents,
-            mcp_servers=self.mcp_servers,
         )
 
     def _get_options_with_yunxiao(
         self,
         dimensions: list[str] | None = None,
         permission_mode: str = "bypassPermissions",  # 自动授权（非 root 用户可用）
-    ) -> ClaudeAgentOptions:
+    ) -> RuntimeOptions:
         """获取包含云效工具的 Agent 配置（单层，直接调用 yunxiao MCP）。
 
         注意：bypassPermissions 不能以 root 运行，需用普通用户。
         """
-        return ClaudeAgentOptions(
+        mcp_config = _get_yunxiao_mcp_config()
+        return RuntimeOptions(
             allowed_tools=list(YUNXIAO_MR_AGENT.tools),
-            permission_mode=permission_mode,
             hooks=self.hooks,
-            mcp_servers={"yunxiao": _get_yunxiao_mcp_config()},
-            stderr=_stderr_logger,
+            remote_mcp_servers=[mcp_config] if mcp_config else [],
+            claude_mcp_servers={"yunxiao": _get_yunxiao_claude_mcp_config()},
         )
 
     async def review_git_diff(
@@ -176,9 +174,8 @@ class CodeReviewAgent:
 3. 性能隐患
 4. 最佳实践建议"""
 
-        options = ClaudeAgentOptions(
+        options = RuntimeOptions(
             allowed_tools=["Agent"],
-            permission_mode="default",
             hooks=self.hooks,
             agents={
                 "security-reviewer": load_agent_definition("security"),
@@ -242,40 +239,10 @@ class CodeReviewAgent:
     async def _run_query(
         self,
         prompt: str,
-        options: ClaudeAgentOptions,
+        options: RuntimeOptions,
     ) -> list[dict[str, Any]]:
         """执行 Agent 查询"""
-        messages: list[dict[str, Any]] = []
-
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                text_parts = []
-                tool_uses = []
-
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        text_parts.append(block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        tool_uses.append({
-                            "type": "tool_use",
-                            "tool": block.name,
-                            "input": block.input,
-                        })
-
-                if text_parts:
-                    messages.append({
-                        "type": "assistant",
-                        "content": text_parts,
-                    })
-                messages.extend(tool_uses)
-
-            elif isinstance(message, ResultMessage):
-                messages.append({
-                    "type": "result",
-                    "subtype": message.subtype,
-                    "content": message.result if hasattr(message, "result") else None,
-                })
-
+        messages = await self.runtime.run(prompt, options)
         self._results = messages
         return messages
 
@@ -307,7 +274,8 @@ class CodeReviewAgent:
         return {
             "raw_messages": messages,
             "summary": final_output,
-            "result_type": result_msg.get("subtype") if result_msg else None,
+            "result_type": "error" if result_msg and result_msg.get("is_error") else result_msg.get("subtype") if result_msg else None,
+            "is_error": bool(result_msg and result_msg.get("is_error")),
             "tools_used": tools_used,
         }
 

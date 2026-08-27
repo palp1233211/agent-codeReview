@@ -1,12 +1,12 @@
-# Claude Code Review Agent Service
+# Code Review Agent Service
 
-基于 Claude Agent SDK 构建的智能代码审查服务，集成云效平台 MCP 工具。
+支持 Claude Agent SDK 与 OpenAI SDK 双运行时的智能代码审查服务，集成云效平台 MCP 工具。
 
 ## 功能特性
 
 - **多维度审查**: 安全漏洞、代码质量、性能问题
 - **云效 MR 审查**: 自动审查云效平台的 Merge Request 并添加评论
-- **自定义 MCP Tools**: Git diff、复杂度分析、Bandit 安全扫描、云效工具
+- **自定义 Tools**: Git diff、复杂度分析、Bandit 安全扫描、云效工具
 - **Hooks 系统**: PreToolUse 验证、PostToolUse 审计
 - **API 服务**: FastAPI HTTP 接口 + SSE 流式响应
 - **CLI 工具**: 命令行快速审查
@@ -19,7 +19,7 @@ my-agent/
 │   ├── main.py                 # FastAPI 服务入口
 │   ├── cli/
 │   │   ├── __init__.py
-│   │   └── main.py             # CLI 入口（基于 Claude Agent SDK）
+│   │   └── main.py             # CLI 入口（支持 Claude/OpenAI 双 SDK）
 │   ├── agents/
 │   │   └── reviewer.py         # Code Review Agent（动态加载提示词）
 │   ├── prompts/                # 🆕 提示词配置模块
@@ -33,10 +33,10 @@ my-agent/
 │   │       ├── frontend.yaml   # 前端项目规则
 │   │       └── backend.yaml    # 后端项目规则
 │   ├── tools/
-│   │   ├── git_tools.py        # Git diff MCP Tools
-│   │   ├── complexity.py       # 代码复杂度 MCP Tools
-│   │   ├── linter.py           # Bandit 安全扫描 MCP Tools
-│   │   └── yunxiao_tools.py    # 云效 MR MCP Tools
+│   │   ├── git_tools.py        # Git diff Tools
+│   │   ├── complexity.py       # 代码复杂度 Tools
+│   │   ├── linter.py           # Bandit 安全扫描 Tools
+│   │   └── yunxiao_tools.py    # 云效 MR Tools
 │   ├── hooks/
 │   │   └── validation.py       # PreToolUse/PostToolUse Hooks
 │   └── models/
@@ -55,12 +55,17 @@ my-agent/
 pip install -r requirements.txt
 
 # 配置环境变量（编辑 .env 文件）
-# 方式 1 - 使用 Anthropic API:
+# 默认使用 Claude Agent SDK
+# AGENT_PROVIDER=claude
 # ANTHROPIC_API_KEY=your_key_here
 #
-# 方式 2 - 使用阿里云代理:
-# ANTHROPIC_BASE_URL=https://coding.dashscope.aliyuncs.com/apps/anthropic
-# ANTHROPIC_API_KEY=your_aliyun_token
+# 切换到 OpenAI SDK
+# AGENT_PROVIDER=openai
+# OPENAI_API_KEY=your_key_here
+# OPENAI_MODEL=gpt-5.4
+# OPENAI_BASE_URL=https://api.openai.com/v1
+# OPENAI_API_MODE=responses  # responses 或 chat_completions
+# YUNXIAO_MCP_URL=https://your-yunxiao-mcp.example.com/mcp  # 云效 MR 审查需要远程 MCP
 
 # 启动服务
 python run.py
@@ -223,9 +228,19 @@ python cli.py yunxiao-mr -r 2835387 -m 42 --no-comment
 
 ```bash
 # 必需
+AGENT_PROVIDER=claude  # claude 或 openai
+
+# Claude 模式
 ANTHROPIC_API_KEY=your_api_key_here
 
+# OpenAI 模式
+OPENAI_API_KEY=your_api_key_here
+
 # 可选
+OPENAI_MODEL=gpt-5.4
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_MODE=responses
+YUNXIAO_MCP_URL=https://your-yunxiao-mcp.example.com/mcp
 SERVICE_PORT=8000
 MAX_FILE_SIZE_KB=500
 ```

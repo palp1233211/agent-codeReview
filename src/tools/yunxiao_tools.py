@@ -1,7 +1,7 @@
 """云效 MCP 工具集成 - MR 代码审查"""
 from typing import Any
 
-from claude_agent_sdk import tool, create_sdk_mcp_server
+from ..agents.runtime import agent_tool as tool
 
 
 @tool(
@@ -251,19 +251,6 @@ async def get_yunxiao_file_content(
         },
     }
 
-
-# 创建云效 MCP Server
-yunxiao_server = create_sdk_mcp_server(
-    name="yunxiao-mr-tools",
-    version="1.0.0",
-    tools=[
-        get_yunxiao_mr,
-        get_yunxiao_mr_diff,
-        comment_on_yunxiao_mr,
-        get_yunxiao_mr_files,
-        get_yunxiao_file_content,
-    ],
-)
 
 
 class YunxiaoMRReviewHelper:

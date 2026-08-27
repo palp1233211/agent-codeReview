@@ -2,7 +2,7 @@
 import subprocess
 from pathlib import Path
 
-from claude_agent_sdk import tool, create_sdk_mcp_server
+from ..agents.runtime import agent_tool as tool
 
 
 @tool(
@@ -185,11 +185,3 @@ async def analyze_commit_history(limit: int = 10, repo_path: str | None = None) 
         ],
         "commits": commits,
     }
-
-
-# 创建 Git MCP Server
-git_server = create_sdk_mcp_server(
-    name="git-tools",
-    version="1.0.0",
-    tools=[get_git_diff, get_file_content, analyze_commit_history],
-)

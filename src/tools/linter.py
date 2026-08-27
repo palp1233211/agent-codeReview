@@ -3,7 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from claude_agent_sdk import tool, create_sdk_mcp_server
+from ..agents.runtime import agent_tool as tool
 
 
 @tool(
@@ -234,11 +234,3 @@ async def lint_code(file_path: str, disable: str = "") -> dict:
         "issues": issues,
         "summary": type_counts,
     }
-
-
-# 创建安全 Linter MCP Server
-linter_server = create_sdk_mcp_server(
-    name="security-linter",
-    version="1.0.0",
-    tools=[security_scan, check_secrets, lint_code],
-)

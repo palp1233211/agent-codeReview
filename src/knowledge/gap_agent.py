@@ -1,4 +1,4 @@
-"""知识盲区补全：跑 Claude agent 读 PHP 代码，校验产出后写入本地知识文档。
+"""知识盲区补全：跑 agent 读 PHP 代码，校验产出后写入本地知识文档。
 
 **agent 不直接写文件**——它只返回结构化 JSON，由这里校验（锚点齐全、块不超长）
 再落盘。把写入权收在 Python 侧，才能真正强制执行分块规则；交给 agent 自己写，
@@ -31,21 +31,6 @@ _BLOCK_SEPARATOR = "\n---\n"
 _MAX_BLOCK_CHARS = 1200
 
 _DEFAULT_MAX_TURNS = 60
-
-# 这些变量由 Claude Code 注入给它自己的子进程。如果本服务恰好在 Claude Code 会话里
-# 启动（开发时很常见），它们会被继承下去，让我们 fork 的 claude CLI 误以为自己是
-# 受控子会话，转而等待父进程的控制协议——表现为静默挂死、无任何输出。
-_CLAUDE_CODE_ENV_PREFIXES = ("CLAUDE_", "CLAUDECODE")
-
-
-def clean_agent_env() -> dict[str, str]:
-    """给 claude CLI 用的干净环境：剥掉宿主 Claude Code 的会话变量。"""
-    return {
-        k: v
-        for k, v in os.environ.items()
-        if not k.startswith(_CLAUDE_CODE_ENV_PREFIXES)
-    }
-
 
 @dataclass(frozen=True)
 class FillResult:
@@ -125,40 +110,29 @@ def _validate_blocks(blocks: str) -> None:
             )
 
 
-def _run_claude_agent(prompt: str, *, repo_path: str, max_turns: int) -> str:
+def _run_agent(prompt: str, *, repo_path: str, max_turns: int) -> str:
     """在 fbi 代码库里跑一次 agent，返回最后一段助手输出。
 
     调用方是 ws_bot 派生的守护线程，线程内没有事件循环，asyncio.run 可以安全新建一个。
     """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        TextBlock,
-        query,
-    )
-
+    from .. import tools as _tools  # noqa: F401 - importing registers local tools
+    from ..agents.runtime import RuntimeOptions, create_agent_runtime
     from ..prompts import load_agent_definition
 
     definition = load_agent_definition("kb_fill")
-    options = ClaudeAgentOptions(
+    options = RuntimeOptions(
         allowed_tools=list(definition.tools),
-        permission_mode="bypassPermissions",
         cwd=repo_path,
         max_turns=max_turns,
-        env=clean_agent_env(),
-        # claude CLI 的启动/认证错误只会出现在 stderr，不接住的话失败时
-        # 只能看到一句 "exit code 1"，无从排查
-        stderr=lambda line: logger.warning("[claude-cli] %s", line),
     )
+    runtime = create_agent_runtime()
 
     async def _collect() -> str:
-        final = ""
-        async for message in query(prompt=f"{definition.prompt}\n\n---\n\n{prompt}", options=options):
-            if isinstance(message, AssistantMessage):
-                texts = [b.text for b in message.content if isinstance(b, TextBlock)]
-                if texts:
-                    final = "\n".join(texts)
-        return final
+        messages = await runtime.run(f"{definition.prompt}\n\n---\n\n{prompt}", options)
+        for message in reversed(messages):
+            if message.get("type") == "assistant":
+                return "\n".join(message.get("content", []))
+        return ""
 
     return asyncio.run(_collect())
 
@@ -180,7 +154,7 @@ class GapFiller:
         self._repo_path = repo_path
         self._max_turns = max_turns
         self._run_agent = run_agent or (
-            lambda prompt: _run_claude_agent(
+            lambda prompt: _run_agent(
                 prompt, repo_path=self._repo_path, max_turns=self._max_turns
             )
         )

@@ -1,10 +1,6 @@
 """Hooks 系统实现 - PreToolUse 验证、PostToolUse 审计和权限自动授权"""
-import json
-import time
 from datetime import datetime
 from typing import Any
-
-from claude_agent_sdk import HookContext, HookMatcher, PermissionResultAllow
 
 # 审计日志存储
 _audit_log: list[dict[str, Any]] = []
@@ -13,7 +9,7 @@ _audit_log: list[dict[str, Any]] = []
 async def pre_tool_validator(
     input_data: dict[str, Any],
     tool_use_id: str | None,
-    context: HookContext,
+    context: Any,
 ) -> dict[str, Any]:
     """PreToolUse Hook - 验证工具调用参数
 
@@ -113,7 +109,7 @@ async def pre_tool_validator(
 async def post_tool_audit(
     input_data: dict[str, Any],
     tool_use_id: str | None,
-    context: HookContext,
+    context: Any,
 ) -> dict[str, Any]:
     """PostToolUse Hook - 审计工具执行结果
 
@@ -168,7 +164,7 @@ async def post_tool_audit(
 async def user_prompt_enricher(
     input_data: dict[str, Any],
     tool_use_id: str | None,
-    context: HookContext,
+    context: Any,
 ) -> dict[str, Any]:
     """UserPromptSubmit Hook - 添加上下文信息"""
     prompt = input_data.get("prompt", "")
@@ -201,7 +197,7 @@ async def user_prompt_enricher(
 async def yunxiao_permission_handler(
     input_data: dict[str, Any],
     tool_use_id: str | None,
-    context: HookContext,
+    context: Any,
 ) -> dict[str, Any]:
     """PermissionRequest Hook - 自动授权云效 MCP 工具调用"""
     tool_name = input_data.get("tool_name", "")
@@ -216,11 +212,10 @@ async def yunxiao_permission_handler(
                 "decision": "auto_allow",
             }
         )
-        allow = PermissionResultAllow()
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PermissionRequest",
-                "decision": {"behavior": allow.behavior},
+                "decision": {"behavior": "allow"},
             }
         }
 
@@ -237,22 +232,22 @@ def clear_audit_log() -> None:
     _audit_log.clear()
 
 
-def get_hooks_config() -> dict[str, list[HookMatcher]]:
-    """获取 Hooks 配置"""
+def get_hooks_config() -> dict[str, list[dict[str, Any]]]:
+    """获取 Hooks 配置（保留给调用方兼容，OpenAI runtime 暂不直接消费）。"""
     return {
         "PreToolUse": [
-            HookMatcher(hooks=[pre_tool_validator]),
-            HookMatcher(matcher="Bash", hooks=[pre_tool_validator]),
-            HookMatcher(matcher="get_file_content", hooks=[pre_tool_validator]),
+            {"hooks": [pre_tool_validator]},
+            {"matcher": "Bash", "hooks": [pre_tool_validator]},
+            {"matcher": "get_file_content", "hooks": [pre_tool_validator]},
         ],
         "PostToolUse": [
-            HookMatcher(hooks=[post_tool_audit]),
-            HookMatcher(matcher="security_scan", hooks=[post_tool_audit]),
+            {"hooks": [post_tool_audit]},
+            {"matcher": "security_scan", "hooks": [post_tool_audit]},
         ],
         "UserPromptSubmit": [
-            HookMatcher(hooks=[user_prompt_enricher]),
+            {"hooks": [user_prompt_enricher]},
         ],
         "PermissionRequest": [
-            HookMatcher(matcher="mcp__yunxiao__*", hooks=[yunxiao_permission_handler]),
+            {"matcher": "mcp__yunxiao__*", "hooks": [yunxiao_permission_handler]},
         ],
     }

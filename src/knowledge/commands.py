@@ -91,7 +91,7 @@ class KbCommands:
         self._sync_gap = sync_gap
         self._notify = notify
         self._executor = executor
-        # 每个 fill 会 fork 一个 claude CLI 子进程，这个信号量同时是内存上限
+        # 每个 fill 会发起一次 agent 补全，这个信号量同时是并发和资源上限
         self._fill_slots = threading.BoundedSemaphore(max_concurrent_fills)
 
     def handle(self, text: str, *, chat_id: str, user_id: str) -> str | None:

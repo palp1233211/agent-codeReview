@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Code Review CLI - 基于 Claude Agent SDK
+Code Review CLI - 支持 Claude Agent SDK / OpenAI SDK
 """
 import asyncio
 import argparse
@@ -12,21 +12,36 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 try:
-    from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
+    from openai import OpenAI  # noqa: F401
+    from claude_agent_sdk import query as _claude_query  # noqa: F401
 except ImportError:
-    print("❌ 错误: 请先安装 claude-agent-sdk")
-    print("   pip install claude-agent-sdk")
+    print("❌ 错误: 请先安装项目依赖")
+    print("   pip install -r requirements.txt")
     sys.exit(1)
 
 
 def _check_env():
+    provider = (os.getenv("AGENT_PROVIDER") or os.getenv("AGENT_SDK") or "claude").lower()
+    print(f"🧭 Provider: {provider}")
+    if provider in {"openai", "openai_sdk"}:
+        api_key = os.getenv("OPENAI_API_KEY")
+        base_url = os.getenv("OPENAI_BASE_URL", "")
+        model = os.getenv("OPENAI_MODEL", "gpt-5.4")
+        if not api_key:
+            print("❌ 错误: 未设置 OPENAI_API_KEY，请在 .env 文件中配置")
+            sys.exit(1)
+        if base_url:
+            print(f"🔗 API endpoint: {base_url}")
+        print(f"🤖 Model: {model}")
+        return
+
     api_key = os.getenv("ANTHROPIC_API_KEY")
     base_url = os.getenv("ANTHROPIC_BASE_URL", "")
     if not api_key:
         print("❌ 错误: 未设置 ANTHROPIC_API_KEY，请在 .env 文件中配置")
         sys.exit(1)
     if base_url:
-        print(f"🔗 API endpoint: {base_url}")
+        print(f"🔗 Claude endpoint: {base_url}")
 
 
 async def cmd_yunxiao_mr(
@@ -193,7 +208,7 @@ async def cmd_diff(base: str, target: str, dimensions: list[str] | None) -> None
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Code Review CLI - 基于 Claude Agent SDK",
+        description="Code Review CLI - 支持 Claude Agent SDK / OpenAI SDK",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -281,7 +296,7 @@ def main():
 
     _check_env()
     print("=" * 50)
-    print("🔍 Claude Agent Code Review")
+    print("🔍 Agent Code Review")
     print("=" * 50)
 
     if args.command == "yunxiao-mr":

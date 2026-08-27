@@ -27,6 +27,11 @@ _DEFAULT_TIMEOUT = 60
 # 中文文档会被生成英文摘要——中文提问对英文摘要，跨语种匹配明显更差。
 _DEFAULT_DOC_LANGUAGE = "Chinese"
 
+# 验证检索用的截断长度和候选数。只是想确认"向量存不存在"，不是真的模拟用户提问，
+# 截一段正文原文去查即可，不需要很长。
+_VERIFY_QUERY_CHARS = 200
+_VERIFY_TOP_K = 10
+
 # 分块分隔符。前后的换行不能省——裸 `---` 会匹配到 markdown 表格分隔行 `|---|---|`，
 # 把表格从中间切碎（实测：2 块含表格的文档被切成 7 块，3 块内容只有一个 `|`）。
 _SEPARATOR = "\n---\n"
@@ -201,6 +206,37 @@ class DifyDatasetClient:
         if all(s == "completed" for s in statuses):
             return "completed"
         return next((s for s in statuses if s != "completed"), "unknown")
+
+    def verify_retrievable(self, document_id: str, sample_text: str) -> bool:
+        """`indexing_status=completed` 不代表这篇文档真的能被检索到。
+
+        实测碰到过：Weaviate 磁盘写满进入只读模式、或者新写入的向量要等 Weaviate
+        重启才刷新内存缓存——这两种情况下 Dify 都照样把文档标记成 completed，
+        用户问相关问题却查不到。这里用推送内容本身的一段原文，不设分数阈值、不
+        走 rerank，做一次语义检索，只确认这篇文档的 segment 有没有出现在候选里，
+        而不是相信状态字段。
+        """
+        query = sample_text.strip()[:_VERIFY_QUERY_CHARS]
+        if not query:
+            return True
+
+        resp = requests.post(
+            f"{self._base_url}/datasets/{self._dataset_id}/hit-testing",
+            headers=self._headers(),
+            json={
+                "query": query,
+                "retrieval_model": {
+                    "search_method": "semantic_search",
+                    "reranking_enable": False,
+                    "top_k": _VERIFY_TOP_K,
+                    "score_threshold_enabled": False,
+                    "score_threshold": 0,
+                },
+            },
+            timeout=self._timeout,
+        )
+        records = self._unwrap(resp).get("records", [])
+        return any(r.get("segment", {}).get("document_id") == document_id for r in records)
 
     @staticmethod
     def _to_ref(payload: dict[str, Any], *, fallback_name: str) -> DocumentRef:

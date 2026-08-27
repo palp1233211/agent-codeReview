@@ -46,7 +46,7 @@ def run_checks() -> list[Check]:
     )
     checks += _path_check("KNOWLEDGE_DOCS_DIR", os.environ.get("KNOWLEDGE_DOCS_DIR", ""))
 
-    checks += _claude_checks()
+    checks += _agent_provider_checks()
 
     key = os.environ.get("DIFY_DATASET_API_KEY", "")
     checks.append(
@@ -62,12 +62,29 @@ def run_checks() -> list[Check]:
     return checks
 
 
-def _claude_checks(timeout_seconds: int = 90) -> list[Check]:
-    """真发一次最小请求验证鉴权。
+def _agent_provider_checks() -> list[Check]:
+    provider = (os.environ.get("AGENT_PROVIDER") or os.environ.get("AGENT_SDK") or "claude").lower()
+    if provider in {"openai", "openai_sdk"}:
+        return _openai_checks()
+    return _claude_checks()
 
-    只查二进制存在是不够的——凭证过期时 CLI 照样在，agent 却会在跑了几分钟后
-    以 `exit code 1` 失败，错误信息还被 SDK 吞掉。这里花几秒换一条明确的报错。
-    """
+
+def _openai_checks() -> list[Check]:
+    """检查 OpenAI runtime 运行所需的基础配置。"""
+    checks = []
+    checks.append(Check("OPENAI_API_KEY", bool(os.environ.get("OPENAI_API_KEY"))))
+    checks.append(Check("OPENAI_MODEL", bool(os.environ.get("OPENAI_MODEL")), os.environ.get("OPENAI_MODEL", "默认 gpt-5.4"), fatal=False))
+    base_url = os.environ.get("OPENAI_BASE_URL", "官方默认")
+    checks.append(Check("OPENAI_BASE_URL", True, base_url, fatal=False))
+    if shutil.which("rg") is None:
+        checks.append(Check("ripgrep", False, "Grep 工具依赖 rg，请安装 ripgrep", fatal=False))
+    else:
+        checks.append(Check("ripgrep", True, shutil.which("rg") or "", fatal=False))
+    return checks
+
+
+def _claude_checks(timeout_seconds: int = 90) -> list[Check]:
+    """真发一次最小请求验证 Claude 鉴权。"""
     import subprocess
 
     claude = shutil.which("claude")
@@ -77,7 +94,7 @@ def _claude_checks(timeout_seconds: int = 90) -> list[Check]:
     endpoint = os.environ.get("ANTHROPIC_BASE_URL", "(官方默认)")
     checks = [Check("claude CLI", True, claude)]
 
-    from .gap_agent import clean_agent_env
+    from ..agents.runtime import clean_claude_env
 
     try:
         proc = subprocess.run(
@@ -85,9 +102,7 @@ def _claude_checks(timeout_seconds: int = 90) -> list[Check]:
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
-            # 与真实 agent 用同一套干净环境，否则在 Claude Code 会话里跑 doctor
-            # 会挂死并误报成"凭证有问题"
-            env=clean_agent_env(),
+            env=clean_claude_env(),
             stdin=subprocess.DEVNULL,
             cwd=os.environ.get("FBI_REPO_PATH") or None,
         )

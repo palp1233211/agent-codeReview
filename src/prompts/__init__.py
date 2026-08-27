@@ -1,4 +1,4 @@
-"""提示词模块 - 从 YAML 配置加载 AgentDefinition
+"""提示词模块 - 从 YAML 配置加载 AgentSpec
 
 支持：
 - 基础规则：security, quality, performance, yunxiao_mr
@@ -8,7 +8,7 @@ import yaml
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import AgentDefinition
+from ..agents.runtime import AgentSpec
 
 # 提示词配置目录
 PROMPTS_DIR = Path(__file__).parent
@@ -23,21 +23,21 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def load_agent_definition(name: str) -> AgentDefinition:
-    """从 YAML 文件加载单个 AgentDefinition
+def load_agent_definition(name: str) -> AgentSpec:
+    """从 YAML 文件加载单个 AgentSpec
 
     Args:
         name: 规则名称（security, quality, performance, yunxiao_mr）
 
     Returns:
-        AgentDefinition 实例
+        AgentSpec 实例
     """
     config = _load_yaml(PROMPTS_DIR / f"{name}.yaml")
 
-    return AgentDefinition(
+    return AgentSpec(
         description=config["description"],
         prompt=config["prompt"],
-        tools=config["tools"],
+        tools=tuple(config["tools"]),
     )
 
 
@@ -53,18 +53,18 @@ def load_business_config(business_type: str) -> dict[str, Any]:
     return _load_yaml(BUSINESS_DIR / f"{business_type}.yaml")
 
 
-def load_business_agents(business_type: str = "default") -> dict[str, AgentDefinition]:
-    """根据业务场景加载所有 AgentDefinition
+def load_business_agents(business_type: str = "default") -> dict[str, AgentSpec]:
+    """根据业务场景加载所有 AgentSpec
 
     Args:
         business_type: 业务类型（default, frontend, backend）
 
     Returns:
-        AgentDefinition 字典，key 为 agent 名称
+        AgentSpec 字典，key 为 agent 名称
     """
     business_config = load_business_config(business_type)
 
-    agents: dict[str, AgentDefinition] = {}
+    agents: dict[str, AgentSpec] = {}
 
     # 加载继承的基础规则
     extends = business_config.get("extends", [])
@@ -77,7 +77,11 @@ def load_business_agents(business_type: str = "default") -> dict[str, AgentDefin
     if custom_prompt:
         for name, agent_def in agents.items():
             # 在原有 prompt 后追加业务特定提示词
-            agent_def.prompt = f"{agent_def.prompt}\n\n---\n\n{business_config['description']}特定关注:\n{custom_prompt}"
+            agents[name] = AgentSpec(
+                description=agent_def.description,
+                prompt=f"{agent_def.prompt}\n\n---\n\n{business_config['description']}特定关注:\n{custom_prompt}",
+                tools=agent_def.tools,
+            )
 
     return agents
 
@@ -95,7 +99,7 @@ def get_available_base_rules() -> list[str]:
 # 预加载的默认 Agent（保持向后兼容）
 DEFAULT_AGENTS = load_business_agents("default")
 
-# 单独导出的 AgentDefinition（向后兼容）
+# 单独导出的 AgentSpec（向后兼容）
 SECURITY_AGENT = load_agent_definition("security")
 QUALITY_AGENT = load_agent_definition("quality")
 PERFORMANCE_AGENT = load_agent_definition("performance")

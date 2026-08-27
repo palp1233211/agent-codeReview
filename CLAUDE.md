@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A CLI-only agent that reviews Yunxiao (云效) Merge Requests via the Claude Agent SDK and posts a single Chinese-language Markdown comment back to the MR. Also includes a standalone Feishu bot (long-connection/WebSocket mode) under `src/lark/`.
+A CLI-only agent that reviews Yunxiao (云效) Merge Requests via either the Claude Agent SDK or the OpenAI SDK and posts a single Chinese-language Markdown comment back to the MR. Also includes a standalone Feishu bot (long-connection/WebSocket mode) under `src/lark/`.
 
 ## Build and Test Commands
 
@@ -27,8 +27,14 @@ pytest tests/
 ## Environment Setup
 
 Copy `.env.example` to `.env` and configure:
-- `ANTHROPIC_API_KEY`: Anthropic API key or Alibaba Cloud token
-- `ANTHROPIC_BASE_URL`: Optional proxy endpoint (e.g. Alibaba Cloud DashScope)
+- `AGENT_PROVIDER`: `claude` by default; set to `openai` to use the OpenAI SDK runtime.
+- `ANTHROPIC_API_KEY`: Required in Claude mode.
+- `ANTHROPIC_BASE_URL`: Optional Claude-compatible endpoint.
+- `OPENAI_API_KEY`: Required in OpenAI mode.
+- `OPENAI_BASE_URL`: Optional OpenAI-compatible endpoint.
+- `OPENAI_MODEL`: Model name for OpenAI mode, defaults to `gpt-5.4`.
+- `OPENAI_API_MODE`: `responses` by default; use `chat_completions` for providers that only implement Chat Completions.
+- `YUNXIAO_MCP_URL`: Remote MCP endpoint for Yunxiao MR review in OpenAI Responses mode. Claude mode keeps using the stdio `npx alibabacloud-devops-mcp-server` MCP config.
 - `YUNXIAO_ACCESS_TOKEN`: Yunxiao platform access token
 - `YUNXIAO_ORG_ID`: Default organization ID for Yunxiao MR operations
 - `LARK_APP_ID` / `LARK_APP_SECRET`: Feishu app credentials, used by `LarkClient` (bi-weekly-doc task) and the `lark-bot` WebSocket bot
@@ -36,13 +42,14 @@ Copy `.env.example` to `.env` and configure:
 - `DB_HOST` / `DB_PORT` / `DB_USERNAME` / `DB_PASSWORD` / `DB_DATABASE` / `DB_CHARSET`: MySQL connection used by `ConversationStore` to log every `lark-bot` question/answer into `lark_bot_conversations`, and by `KnowledgeGapStore` for `lark_bot_knowledge_gaps`
 - `DIFY_DATASET_API_KEY` / `DIFY_DATASET_ID`: Dify **knowledge base (dataset) API** credentials. This is a *different* key from `DIFY_API_KEY` — dataset keys are created under 知识库 → Service API and carry a `dataset-`/`ds-` prefix, while `DIFY_API_KEY` is the `app-`-prefixed application key used for `/chat-messages`. Using the app key against dataset endpoints silently 401s.
 - `KNOWLEDGE_DOCS_DIR` / `FBI_REPO_PATH`: local knowledge markdown root and the code root the gap-filling agent reads. Both are **mounted from the host** in Docker deployments — never hardcode either path. `FBI_REPO_PATH` may point to a parent directory containing several independent project checkouts as subdirectories (e.g. `fbi/`, `bi-common/`, `ard-api/`) rather than a single repo — the agent is prompted to discover subdirectories itself and defaults to `fbi/` when no better signal is given.
-- `KB_CHUNK_MAX_TOKENS` / `KB_MAX_CONCURRENT_FILLS`: Dify chunk size limit, and the cap on concurrent `claude` CLI subprocesses spawned by `/kb fill`.
+- `KB_CHUNK_MAX_TOKENS` / `KB_MAX_CONCURRENT_FILLS`: Dify chunk size limit, and the cap on concurrent agent fills spawned by `/kb fill`.
 
 ## Architecture
 
 ### Core Components
 
-- **`src/agents/reviewer.py`**: `CodeReviewAgent` — sole entry point `review_yunxiao_mr()`, builds the prompt from `YUNXIAO_MR_AGENT` and runs `claude_agent_sdk.query` against the yunxiao MCP server.
+- **`src/agents/reviewer.py`**: `CodeReviewAgent` — entry point for `review_yunxiao_mr()`, `review_files()`, and `review_git_diff()`. It builds prompts from YAML and selects the runtime via `AGENT_PROVIDER`.
+- **`src/agents/runtime.py`**: provider-neutral runtime layer. `ClaudeAgentRuntime` preserves Claude Agent SDK behavior, including the native `Agent` tool, hooks, and stdio MCP servers. `OpenAIAgentRuntime` uses OpenAI Responses or Chat Completions, registers local function tools, implements an `Agent` function tool for subagent dispatch, and executes pre/post hooks around local tool calls.
 - **`src/prompts/yunxiao_mr.yaml`**: prompt + allowed tool list for the MR reviewer.
 - **`src/prompts/__init__.py`**: thin YAML loader exporting `YUNXIAO_MR_AGENT`.
 - **`src/hooks/validation.py`**: PreToolUse / PostToolUse / UserPromptSubmit hooks (path validation, audit log, prompt enrichment).
@@ -58,7 +65,7 @@ Copy `.env.example` to `.env` and configure:
 - **`src/storage/kb_document_store.py`**: `KbDocumentStore` — `doc_path ↔ dify_document_id` mapping in table `kb_documents`, unique on `(dify_dataset_id, doc_path)` so dev and prod datasets can't cross-contaminate. Deliberately **not** stored in `index.yaml`: document ids are environment-scoped mutable state and would cause merge conflicts in git.
 - **`src/knowledge/`**: domain package (sibling of `src/agents/`, not an external-system adapter).
   - `gap_recorder.render_answer()` — the only entry point `ws_bot.py` knows about for the answer path. **Security invariant**: once an answer is identified as an envelope the raw JSON is **never** sent to the user, whatever the `intent` value; and a DB failure while enqueuing must not block the reply (it degrades to a generic message).
-  - `commands.py` — `/kb list|fill|approve|sync|delete` Feishu commands, intercepted **before** forwarding to Dify. Slow actions (`fill`/`approve`/`sync`) run through an injected `executor` (daemon thread in production, synchronous in tests); `delete` is a plain synchronous DB delete — it's not slow enough to need one. Concurrency is guarded twice: a `BoundedSemaphore` caps concurrent `claude` CLI subprocesses, and `gap_store.try_claim()` CAS prevents double-processing across restarts/replicas. `delete` refuses rows in `filling`/`syncing` (a background thread is actively working the row and would hit `GapRowMissing` on completion) but otherwise removes the row unconditionally — it only deletes the local queue record, never anything already pushed to Dify. `/kb fill <id>` also accepts free trailing text (`parse_command`'s `KbCommand.hint`, split with `maxsplit=3` so the hint keeps internal whitespace) — since `FBI_REPO_PATH` may hold several project checkouts as sibling subdirectories, a human can name the project/method here to steer the agent instead of it guessing.
+  - `commands.py` — `/kb list|fill|approve|sync|delete` Feishu commands, intercepted **before** forwarding to Dify. Slow actions (`fill`/`approve`/`sync`) run through an injected `executor` (daemon thread in production, synchronous in tests); `delete` is a plain synchronous DB delete — it's not slow enough to need one. Concurrency is guarded twice: a `BoundedSemaphore` caps concurrent agent fills, and `gap_store.try_claim()` CAS prevents double-processing across restarts/replicas. `delete` refuses rows in `filling`/`syncing` (a background thread is actively working the row and would hit `GapRowMissing` on completion) but otherwise removes the row unconditionally — it only deletes the local queue record, never anything already pushed to Dify. `/kb fill <id>` also accepts free trailing text (`parse_command`'s `KbCommand.hint`, split with `maxsplit=3` so the hint keeps internal whitespace) — since `FBI_REPO_PATH` may hold several project checkouts as sibling subdirectories, a human can name the project/method here to steer the agent instead of it guessing.
   - `docs_repo.py` — `DocsRepo`: `index.yaml` routing, per-`doc_path` write locks, `<!-- src: -->` anchor lookup, and path-traversal rejection (agent-produced `doc_path` is untrusted).
   - `gap_agent.py` — `GapFiller`. **The agent never writes files itself**; it returns structured JSON that Python validates (source anchors present, block under the size cap) before writing. Keeping the write authority in Python is what makes the chunking rules enforceable rather than merely suggested. If the agent can't determine the answer, the row goes to `needs_human` and **nothing** is written. `fill()`'s optional `hint` kwarg (from `/kb fill <id> <hint>`) is folded verbatim into the agent prompt by `_build_prompt`, not passed as a separate arg to `_run_agent` — the agent still only ever sees one prompt string.
   - `sync.py` — `GapSyncer`: idempotent via `content_sha256` (unchanged content skips the push), polls indexing to completion, and reports failure honestly instead of claiming success.
@@ -73,7 +80,7 @@ Copy `.env.example` to `.env` and configure:
 
 Writing to local markdown needs no confirmation (git can roll it back); **pushing to the live Dify knowledge base always does**.
 
-Run `python cli.py kb-doctor` before deploying — it verifies mounted paths, credential *types*, and actually exercises `claude -p` rather than just checking the binary exists.
+Run `python cli.py kb-doctor` before deploying — it verifies mounted paths, credential *types*, OpenAI runtime configuration, Dify settings, and database connectivity.
 
 ### Dify Gotchas (all verified empirically against a live instance — do not "simplify" these)
 
@@ -81,12 +88,11 @@ Run `python cli.py kb-doctor` before deploying — it verifies mounted paths, cr
 - **`doc_language` must be sent explicitly** (`"Chinese"`). Dify interpolates it into the summary prompt's `{language}` placeholder; the default is `English`, which yields English summaries for Chinese documents — and a Chinese query matches an English summary poorly.
 - **Summaries survive nothing.** `update-by-text` recreates all segments with new ids, so per-segment `summary` values are wiped. If the dataset's Summary Index is enabled they are regenerated asynchronously *after* `indexing-status` already reports `completed`; if it is disabled they are simply gone. `summary` is writable only via the segment-level API (`SegmentUpdateArgs`), never via `update-by-text`.
 - **Never push a block that has only a heading.** With no facts to work from, the summary model fabricates. Observed on a 20-char title-only chunk: it invented "cat=21 对应严重违规，cat=22 对应一般违规" — cat=21 is actually 客户投诉 and cat=22 does not exist. `render_for_dify` drops such blocks (`_has_body`).
-- **`CLAUDE_*` / `CLAUDECODE` env vars must be stripped** before spawning the `claude` CLI (`clean_agent_env`). If this service is launched from inside a Claude Code session, the child CLI thinks it is a controlled sub-session and hangs silently with no output — which looks exactly like a credential failure.
-- The Anthropic-protocol proxy used by `ANTHROPIC_BASE_URL` is a **different Alibaba product** from the DashScope model service Dify uses. Same vendor, separate endpoints, credentials, and quotas: one working does not imply the other does.
+- Provider behavior differs: Claude mode keeps the original Claude Agent SDK mechanism. In OpenAI mode, use `OPENAI_API_MODE=responses` when the provider implements Responses API and MCP tools; use `OPENAI_API_MODE=chat_completions` for providers that only implement Chat Completions and local function tools.
 
 ### Yunxiao MR Review Flow
 
-The agent runs as a single-layer query (no sub-agent dispatch) so all yunxiao MCP tools are called directly. Tool sequence (via `mcp__yunxiao__*`):
+The agent runs as a single-layer query (no sub-agent dispatch) so all yunxiao MCP tools are called directly through the configured remote MCP server. Tool sequence (via `mcp__yunxiao__*`):
 
 1. `get_change_request` → MR details
 2. `list_change_request_patch_sets` → find latest `MERGE_SOURCE` patch set

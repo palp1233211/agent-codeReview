@@ -3,7 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from claude_agent_sdk import tool, create_sdk_mcp_server
+from ..agents.runtime import agent_tool as tool
 
 
 @tool(
@@ -260,11 +260,3 @@ async def check_code_duplication(paths: list[str], min_lines: int = 4) -> dict:
         ],
         "duplicates": duplicates,
     }
-
-
-# 创建复杂度分析 MCP Server
-complexity_server = create_sdk_mcp_server(
-    name="complexity-tools",
-    version="1.0.0",
-    tools=[analyze_complexity, analyze_maintainability, check_code_duplication],
-)

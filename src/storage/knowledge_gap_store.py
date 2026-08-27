@@ -84,7 +84,7 @@ SET status = 'synced', dify_document_id = %s, dify_batch = %s
 WHERE id = %s
 """
 
-# 进程在 fill 途中挂掉（重启 / OOM / claude CLI 崩溃）时，行会永久停在 filling：
+# 进程在 fill 途中挂掉（重启 / OOM / agent 调用失败）时，行会永久停在 filling：
 # CAS 抢占只认 pending，所以不会被重试；/kb list 也不展示 filling，于是静默卡死。
 _RECLAIM_STALE_SQL = """
 UPDATE lark_bot_knowledge_gaps

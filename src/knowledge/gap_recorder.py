@@ -50,7 +50,7 @@ def render_answer(
     """
     envelope = parse_envelope(answer)
     if envelope is None:
-        return answer
+        return answer if answer.strip() else _EMPTY_ENVELOPE_FALLBACK
 
     if not envelope.has_gap:
         return envelope.content or _EMPTY_ENVELOPE_FALLBACK
