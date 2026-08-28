@@ -1,65 +1,13 @@
-"""Code Review Agent 测试"""
+"""CodeReviewAgent tests for the current provider-neutral runtime."""
+from __future__ import annotations
+
 import pytest
-from src.models import (
-    ReviewRequest,
-    ReviewDimension,
-    SourceType,
-    FilesSource,
-    GitDiffSource,
-    CodeSnippetSource,
-)
+
+from src.agents import reviewer
+from src.hooks import get_hooks_config
 
 
-def test_review_request_files():
-    """测试文件审查请求模型"""
-    request = ReviewRequest(
-        source=FilesSource(
-            type=SourceType.FILES,
-            paths=["src/main.py", "src/utils.py"],
-        ),
-        dimensions=[ReviewDimension.SECURITY, ReviewDimension.QUALITY],
-    )
-
-    assert request.source.type == SourceType.FILES
-    assert len(request.source.paths) == 2
-    assert ReviewDimension.SECURITY in request.dimensions
-
-
-def test_review_request_git_diff():
-    """测试 Git diff 审查请求模型"""
-    request = ReviewRequest(
-        source=GitDiffSource(
-            type=SourceType.GIT_DIFF,
-            base_branch="main",
-            target_branch="feature/test",
-        ),
-        dimensions=[ReviewDimension.ALL],
-    )
-
-    assert request.source.type == SourceType.GIT_DIFF
-    assert request.source.base_branch == "main"
-
-
-def test_review_request_code_snippet():
-    """测试代码片段审查请求模型"""
-    request = ReviewRequest(
-        source=CodeSnippetSource(
-            type=SourceType.CODE_SNIPPET,
-            code="def hello(): print('hello')",
-            language="python",
-        ),
-        dimensions=[ReviewDimension.QUALITY],
-    )
-
-    assert request.source.type == SourceType.CODE_SNIPPET
-    assert "hello" in request.source.code
-
-
-@pytest.mark.asyncio
-async def test_hooks_config():
-    """测试 Hooks 配置"""
-    from src.hooks import get_hooks_config
-
+def test_hooks_config():
     config = get_hooks_config()
 
     assert "PreToolUse" in config
@@ -67,28 +15,47 @@ async def test_hooks_config():
     assert "UserPromptSubmit" in config
 
 
+def test_agent_initialization_uses_runtime_factory(monkeypatch):
+    runtime = object()
+    hooks = {"PreToolUse": []}
+    monkeypatch.setattr(reviewer, "create_agent_runtime", lambda: runtime)
+
+    agent = reviewer.CodeReviewAgent(business_type="backend", custom_hooks=hooks)
+
+    assert agent.runtime is runtime
+    assert agent.hooks is hooks
+    assert agent.business_type == "backend"
+
+
 @pytest.mark.asyncio
-async def test_agent_initialization():
-    """测试 Agent 初始化"""
-    from src.agents import CodeReviewAgent
+async def test_review_code_snippet_uses_agent_runtime(monkeypatch):
+    class FakeRuntime:
+        prompt = None
+        options = None
 
-    agent = CodeReviewAgent()
+        async def run(self, prompt, options):
+            self.prompt = prompt
+            self.options = options
+            return [
+                {"type": "assistant", "content": ["reviewed"]},
+                {"type": "result", "subtype": "success", "content": "reviewed"},
+            ]
 
-    assert agent.mcp_servers is not None
-    assert agent.hooks is not None
+    runtime = FakeRuntime()
+    monkeypatch.setattr(reviewer, "create_agent_runtime", lambda: runtime)
+    agent = reviewer.CodeReviewAgent(custom_hooks={"PreToolUse": []})
 
-
-@pytest.mark.asyncio
-async def test_review_code_snippet():
-    """测试代码片段审查"""
-    from src.agents import default_review_agent
-
-    # 简单的代码片段审查
-    result = await default_review_agent.review_code_snippet(
+    result = await agent.review_code_snippet(
         code="password = 'hardcoded_secret'",
         language="python",
+        filename="example.py",
         dimensions=["security"],
     )
 
-    assert result is not None
-    assert "summary" in result
+    assert "password = 'hardcoded_secret'" in runtime.prompt
+    assert "语言: python" in runtime.prompt
+    assert "文件名: example.py" in runtime.prompt
+    assert runtime.options.allowed_tools == ["Agent"]
+    assert runtime.options.allowed_agents == ["security-reviewer", "quality-reviewer"]
+    assert result["summary"] == "reviewed"
+    assert result["is_error"] is False

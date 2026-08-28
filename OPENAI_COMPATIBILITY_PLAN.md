@@ -26,7 +26,7 @@
 - [x] MCP 生命周期：验证 HTTP session、HTTP 流响应、SSE 连接/线程及 runtime 持有的 clients 均被关闭。
 - [x] 修复 `.gitignore`，确保新增测试可被 Git 发现并在后续提交中进入 CI。
 - [x] 错误结果闭环：`max_turns` 和模型输出不完整时，CLI 不打印成功并返回非零退出码；工具错误允许模型重试恢复。
-- [ ] 修复历史测试中的 `clean_agent_env`、`src.models` 等陈旧引用，恢复完整 `pytest` 收集与执行。
+- [x] 修复历史测试中的 `clean_agent_env`、`src.models` 等陈旧引用，恢复完整 `pytest` 收集与执行。
 
 ### Phase 1 验收标准
 
@@ -58,7 +58,7 @@
 - [ ] 评估 OpenAI-only 镜像是否仍需 Node.js 和 Claude CLI。
 - [ ] 统一 Claude/OpenAI 的云效 MCP 配置构建逻辑。
 - [ ] 删除或实现 `src/tools/yunxiao_tools.py` 中的占位工具。
-- [ ] 清理陈旧测试和已删除模块引用。
+- [x] 清理陈旧测试和已删除模块引用。
 - [ ] 修正 README 中不存在的 FastAPI、`run.py`、`src/main.py` 和 models 描述。
 - [ ] 更新 CLAUDE.md 的实际 MCP 工具链说明。
 - [ ] 补充 OpenAI-compatible 配置矩阵、故障排查和真实验证步骤。
@@ -76,3 +76,4 @@
 | 2026-08-28 | MCP HTTP/SSE 协议收口 | 鉴权头、401/403/500、严格 ID、EOF/close/reconnect；定向测试累计 33 passed |
 | 2026-08-28 | OpenAI stdio 配置边界 | reviewer 和 MCP factory 均明确拒绝 stdio/未知 transport；Claude stdio 不受影响 |
 | 2026-08-28 | 错误状态和 CLI 退出码 | 未恢复工具错误为 tool_error，同操作重试成功可恢复；MCP isError 和子 Agent 错误透传；三个审查命令非零退出；定向测试累计 70 passed |
+| 2026-08-28 | 完整测试收集恢复 | 迁移 clean_claude_env 测试、删除旧 src.models schema 测试并重写 reviewer runtime 测试；全量 283 passed |
