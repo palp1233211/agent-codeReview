@@ -36,9 +36,7 @@ Copy `.env.example` to `.env` and configure:
 - `OPENAI_API_MODE`: `responses` by default; use `chat_completions` for providers that only implement Chat Completions.
 - `YUNXIAO_ACCESS_TOKEN`: Yunxiao platform access token
 - `YUNXIAO_ORG_ID`: Default organization ID for Yunxiao MR operations
-- `YUNXIAO_MCP_URL`: HTTP MCP endpoint used directly by the OpenAI runtime.
-- `YUNXIAO_MCP_TRANSPORT`: `http` or `stdio`; stdio starts the local Yunxiao MCP process.
-- `YUNXIAO_MCP_COMMAND` / `YUNXIAO_MCP_ARGS`: local MCP command and space-separated arguments for stdio mode.
+- `YUNXIAO_MCP_URL`: HTTP or SSE MCP endpoint used directly by the OpenAI runtime.
 - `YUNXIAO_TOOLSETS`: Yunxiao MCP toolsets header, defaults to `code-management`.
 - `LARK_APP_ID` / `LARK_APP_SECRET`: Feishu app credentials, used by `LarkClient` (bi-weekly-doc task) and the `lark-bot` WebSocket bot
 - `DIFY_BASE_URL` / `DIFY_API_KEY`: local Dify instance + app API key, used by `DifyClient` to forward `lark-bot` messages to a Dify Chatflow
@@ -53,7 +51,7 @@ Copy `.env.example` to `.env` and configure:
 
 - **`src/agents/reviewer.py`**: `CodeReviewAgent` — entry point for `review_yunxiao_mr()`, `review_files()`, and `review_git_diff()`. It builds prompts from YAML and selects the runtime via `AGENT_PROVIDER`.
 - **`src/agents/runtime.py`**: provider-neutral runtime layer. `ClaudeAgentRuntime` preserves Claude Agent SDK behavior, including the native `Agent` tool, hooks, and stdio MCP servers. `OpenAIAgentRuntime` uses OpenAI Responses or Chat Completions and bridges HTTP MCP tools into ordinary function tools so compatible providers do not need native `type=mcp` support.
-- **`src/agents/mcp_client.py`**: Streamable HTTP MCP client used by the OpenAI runtime for `initialize`, `tools/list`, and `tools/call`.
+- **`src/agents/mcp_client.py`**: HTTP/SSE MCP client used by the OpenAI runtime for `initialize`, `tools/list`, and `tools/call`.
 - **`src/prompts/yunxiao_mr.yaml`**: prompt + allowed tool list for the MR reviewer.
 - **`src/prompts/__init__.py`**: thin YAML loader exporting `YUNXIAO_MR_AGENT`.
 - **`src/hooks/validation.py`**: PreToolUse / PostToolUse / UserPromptSubmit hooks (path validation, audit log, prompt enrichment).

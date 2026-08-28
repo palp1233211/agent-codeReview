@@ -3,10 +3,7 @@ from __future__ import annotations
 
 import itertools
 import json
-import os
 import queue
-import select
-import subprocess
 import threading
 from urllib.parse import urljoin
 from dataclasses import dataclass
@@ -298,148 +295,12 @@ class SseMcpClient:
         self._initialized = False
 
 
-class StdioMcpClient:
-    """JSON-lines stdio MCP client for local MCP server processes."""
-
-    def __init__(
-        self,
-        *,
-        server_label: str,
-        command: str,
-        args: list[str] | None = None,
-        env: dict[str, str] | None = None,
-        timeout: float = 30.0,
-    ) -> None:
-        self.server_label = server_label
-        self.command = command
-        self.args = args or []
-        self.env = {**os.environ, **(env or {})}
-        self.timeout = timeout
-        self._process: subprocess.Popen[str] | None = None
-        self._request_ids = itertools.count(1)
-        self._initialized = False
-
-    def initialize(self) -> None:
-        if self._initialized:
-            return
-        self._ensure_process()
-        self._request(
-            "initialize",
-            {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {"name": "my-agent", "version": "1.0"},
-            },
-        )
-        self._notify("notifications/initialized")
-        self._initialized = True
-
-    def list_tools(self) -> list[McpTool]:
-        self.initialize()
-        result = self._request("tools/list", {})
-        return [
-            McpTool(
-                exposed_name=f"mcp__{self.server_label}__{item['name']}",
-                server_name=item["name"],
-                description=str(item.get("description") or ""),
-                input_schema=item.get("inputSchema") or {"type": "object", "properties": {}},
-            )
-            for item in result.get("tools", [])
-            if item.get("name")
-        ]
-
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        self.initialize()
-        return self._request("tools/call", {"name": name, "arguments": arguments})
-
-    def close(self) -> None:
-        if self._process is not None and self._process.poll() is None:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-        self._process = None
-        self._initialized = False
-
-    def _ensure_process(self) -> None:
-        if self._process is not None and self._process.poll() is None:
-            return
-        self._process = subprocess.Popen(
-            [self.command, *self.args],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            text=True,
-            bufsize=1,
-            env=self.env,
-        )
-
-    def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        self._ensure_process()
-        assert self._process is not None
-        if self._process.stdin is None or self._process.stdout is None:
-            raise McpClientError(f"MCP {self.server_label} stdio 管道不可用")
-        payload = {
-            "jsonrpc": "2.0",
-            "id": next(self._request_ids),
-            "method": method,
-            "params": params,
-        }
-        try:
-            self._process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            self._process.stdin.flush()
-            ready, _, _ = select.select([self._process.stdout], [], [], self.timeout)
-            if not ready:
-                raise McpClientError(f"MCP {self.server_label} {method} 超时")
-            line = self._process.stdout.readline()
-        except (BrokenPipeError, OSError) as exc:
-            self.close()
-            raise McpClientError(f"MCP {self.server_label} stdio 连接断开: {exc}") from exc
-        if not line:
-            code = self._process.poll()
-            self.close()
-            raise McpClientError(f"MCP {self.server_label} 进程退出: code={code}")
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise McpClientError(f"MCP {self.server_label} 返回无效 JSON: {line[:200]}") from exc
-        if data.get("error"):
-            error = data["error"]
-            raise McpClientError(
-                f"MCP {self.server_label} {method} 失败: "
-                f"{error.get('message') or json.dumps(error, ensure_ascii=False)}"
-            )
-        result = data.get("result", {})
-        return result if isinstance(result, dict) else {"content": result}
-
-    def _notify(self, method: str) -> None:
-        if self._process is None or self._process.stdin is None:
-            raise McpClientError(f"MCP {self.server_label} stdio 管道不可用")
-        self._process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method}) + "\n")
-        self._process.stdin.flush()
-
-
-def create_mcp_clients(
+def create_http_mcp_clients(
     configs: list[dict[str, Any]],
-) -> list[HttpMcpClient | SseMcpClient | StdioMcpClient]:
-    """Build HTTP or stdio MCP clients from runtime configuration."""
+) -> list[HttpMcpClient | SseMcpClient]:
+    """Build HTTP MCP clients from runtime configuration."""
     clients = []
     for config in configs:
-        if config.get("transport") == "stdio":
-            command = config.get("command")
-            if not command:
-                continue
-            clients.append(
-                StdioMcpClient(
-                    server_label=str(config.get("server_label") or "mcp"),
-                    command=str(command),
-                    args=[str(item) for item in config.get("args") or []],
-                    env={str(k): str(v) for k, v in (config.get("env") or {}).items()},
-                    timeout=float(config.get("timeout") or 30),
-                )
-            )
-            continue
         server_url = config.get("server_url") or config.get("url")
         if not server_url:
             continue
@@ -462,6 +323,3 @@ def create_mcp_clients(
             )
         )
     return clients
-
-
-create_http_mcp_clients = create_mcp_clients

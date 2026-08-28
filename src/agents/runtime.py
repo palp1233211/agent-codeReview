@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .mcp_client import HttpMcpClient, McpTool, SseMcpClient, StdioMcpClient, create_mcp_clients
+from .mcp_client import HttpMcpClient, McpTool, SseMcpClient, create_http_mcp_clients
 
 ToolCallable = Callable[..., Any | Awaitable[Any]]
 
@@ -440,7 +440,7 @@ class OpenAIAgentRuntime:
         verbose: bool = False,
         progress_prefix: str = "agent",
         mcp_tools: dict[
-            str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient | StdioMcpClient, McpTool]
+            str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient, McpTool]
         ] | None = None,
     ) -> Any:
         if name == "Agent":
@@ -502,12 +502,12 @@ class OpenAIAgentRuntime:
         *,
         chat_completions: bool = False,
     ) -> dict[
-        str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient | StdioMcpClient, McpTool]
+        str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient, McpTool]
     ]:
         imported: dict[
-            str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient | StdioMcpClient, McpTool]
+            str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient, McpTool]
         ] = {}
-        for client in create_mcp_clients(options.remote_mcp_servers):
+        for client in create_http_mcp_clients(options.remote_mcp_servers):
             tools = await asyncio.to_thread(client.list_tools)
             selected = [tool for tool in tools if not allowed or tool.exposed_name in allowed]
             _progress(

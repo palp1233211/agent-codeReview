@@ -30,7 +30,7 @@ async def get_yunxiao_mr(
     """获取云效 MR 详情。
 
     现在的实现保留为结构化占位工具，供 Claude/OpenAI runtime 统一调度。
-    真正的云效 MCP 调用由 runtime 侧的远程 MCP/stdio server 承担。
+    真正的云效 MCP 调用由 runtime 侧的远程 MCP server 承担。
     """
     return {
         "content": [

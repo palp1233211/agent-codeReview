@@ -17,25 +17,10 @@ DEFAULT_ORG_ID = os.getenv("YUNXIAO_ORG_ID", "5ea86562f89c9700014a671f")
 
 
 def _get_yunxiao_mcp_config() -> dict[str, Any]:
-    """获取 OpenAI runtime 直接连接的云效 MCP 配置。"""
-    transport = os.getenv("YUNXIAO_MCP_TRANSPORT", "http").lower()
+    """获取 OpenAI runtime 通过 HTTP 连接的云效 MCP 配置。"""
     headers = {}
     token = os.getenv("YUNXIAO_ACCESS_TOKEN") or os.getenv("YUNXIAO_TOKEN")
     toolsets = os.getenv("YUNXIAO_TOOLSETS", "code-management")
-    if transport == "stdio":
-        return {
-            "transport": "stdio",
-            "server_label": "yunxiao",
-            "command": os.getenv("YUNXIAO_MCP_COMMAND", "npx"),
-            "args": os.getenv(
-                "YUNXIAO_MCP_ARGS",
-                "-y alibabacloud-devops-mcp-server",
-            ).split(),
-            "env": {
-                "YUNXIAO_ACCESS_TOKEN": token or "",
-                "DEVOPS_TOOLSETS": toolsets,
-            },
-        }
     server_url = os.getenv("YUNXIAO_MCP_URL")
     if not server_url:
         return {}
