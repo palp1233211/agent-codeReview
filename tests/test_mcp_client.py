@@ -4,6 +4,7 @@ from __future__ import annotations
 from unittest.mock import Mock
 
 import pytest
+import requests
 
 from src.agents.mcp_client import (
     HttpMcpClient,
@@ -99,6 +100,8 @@ def test_http_mcp_client_lists_and_calls_tools():
     ]
     assert result["content"][0]["text"] == "MR 1185"
     assert client._session.headers["Mcp-Session-Id"] == "session-1"  # noqa: SLF001
+    assert client._session.headers["Authorization"] == "Bearer secret"  # noqa: SLF001
+    assert client._session.post.call_args_list[0].kwargs["stream"] is True  # noqa: SLF001
 
 
 def test_http_mcp_client_surfaces_json_rpc_errors():
@@ -179,6 +182,42 @@ def test_http_mcp_client_rejects_mismatched_json_rpc_id():
 
     with pytest.raises(McpClientError, match="响应 id 不匹配"):
         client.call_tool("get_change_request", {})
+
+
+@pytest.mark.parametrize("invalid_id", [True, "1"])
+def test_http_mcp_client_rejects_coerced_json_rpc_ids(invalid_id):
+    client = HttpMcpClient(server_label="yunxiao", server_url="https://example.test/mcp")
+    client._initialized = True  # noqa: SLF001
+    client._session.post = Mock(  # noqa: SLF001
+        return_value=_response({"jsonrpc": "2.0", "id": invalid_id, "result": {"ignored": True}})
+    )
+
+    with pytest.raises(McpClientError, match="响应 id 不匹配"):
+        client.call_tool("get_change_request", {})
+
+
+def test_http_mcp_client_accepts_equivalent_numeric_json_rpc_id():
+    client = HttpMcpClient(server_label="yunxiao", server_url="https://example.test/mcp")
+    client._initialized = True  # noqa: SLF001
+    client._session.post = Mock(  # noqa: SLF001
+        return_value=_response({"jsonrpc": "2.0", "id": 1.0, "result": {"ok": True}})
+    )
+
+    assert client.call_tool("get_change_request", {}) == {"ok": True}
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 500])
+def test_http_mcp_client_closes_http_error_responses(status_code):
+    response = _response({}, status_code=status_code)
+    response.raise_for_status.side_effect = requests.HTTPError(f"HTTP {status_code}")
+    client = HttpMcpClient(server_label="yunxiao", server_url="https://example.test/mcp")
+    client._initialized = True  # noqa: SLF001
+    client._session.post = Mock(return_value=response)  # noqa: SLF001
+
+    with pytest.raises(requests.HTTPError, match=str(status_code)):
+        client.call_tool("get_change_request", {})
+
+    response.close.assert_called_once_with()
 
 
 def test_http_mcp_client_close_releases_session():
@@ -279,6 +318,63 @@ def test_legacy_sse_close_releases_sessions_and_thread():
     stream_thread.join.assert_called_once()
     assert client._stream_thread is None  # noqa: SLF001
     assert client._messages_url is None  # noqa: SLF001
+
+
+def test_legacy_sse_reconnects_after_eof_and_close():
+    import queue
+
+    def stream_response(endpoint: str):
+        lines = queue.Queue()
+        lines.put(b"event: endpoint")
+        lines.put(f"data: {endpoint}".encode())
+        lines.put(b"")
+        response = Mock()
+        response.raise_for_status.return_value = None
+
+        def consume():
+            while True:
+                line = lines.get(timeout=1)
+                if line is None:
+                    return
+                yield line
+
+        response.iter_lines.side_effect = lambda **_kwargs: consume()
+        response.close.side_effect = lambda: lines.put(None)
+        return response, lines
+
+    first, first_lines = stream_response("/messages/one")
+    second, second_lines = stream_response("/messages/two")
+    client = SseMcpClient(server_label="yunxiao", server_url="https://example.test/sse")
+    client._stream_session.get = Mock(side_effect=[first, second])  # noqa: SLF001
+
+    def post_response(_url, *, json, **_kwargs):
+        request_id = json.get("id")
+        target = first_lines if request_id in {1, 2, 3} else second_lines
+        if request_id in {1, 2, 4, 5}:
+            target.put(b"event: message")
+            target.put(
+                (
+                    'data: {"jsonrpc":"2.0","id":%d,"result":{"tools":[]}}'
+                    % request_id
+                ).encode()
+            )
+            target.put(b"")
+        return _response({})
+
+    client._session.post = Mock(side_effect=post_response)  # noqa: SLF001
+
+    assert client.list_tools() == []
+    first_lines.put(None)
+    client._stream_thread.join(timeout=1)  # noqa: SLF001
+    with pytest.raises(McpClientError, match="SSE 连接断开.*流已结束"):
+        client.call_tool("after-eof", {})
+    client.close()
+    assert client.list_tools() == []
+    client.close()
+
+    assert client._stream_session.get.call_count == 2  # noqa: SLF001
+    assert first.close.call_count == 1
+    assert second.close.call_count == 1
 
 
 @pytest.mark.asyncio

@@ -19,11 +19,11 @@
 - [x] Responses API：覆盖连续多个工具调用及 function-call 上下文重放。
 - [x] Chat Completions：覆盖 assistant tool_calls、tool result、最终文本的完整多轮链路。
 - [ ] 两种 API mode：覆盖工具异常、未知工具和达到 `max_turns`。（已完成 `max_turns`，其余待补）
-- [ ] MCP Streamable HTTP：覆盖 initialize、tools/list、tools/call、鉴权头和错误响应。（已完成主链路、session、响应 ID、notification 和 JSON-RPC error；鉴权头/HTTP 错误待补）
-- [ ] MCP SSE：覆盖多事件响应、notification/progress 事件及目标 JSON-RPC 响应匹配。（已覆盖队列匹配、notification、队列等待超时、建连超时、超时线程退出和 close 调用路径；正常连接线程退出、EOF/重连待补）
+- [x] MCP Streamable HTTP：覆盖 initialize、tools/list、tools/call、鉴权头、流式多事件、严格响应 ID 和 HTTP/JSON-RPC 错误。
+- [x] MCP SSE：覆盖 endpoint 建连、notification/progress、目标响应匹配、超时、真实请求后 EOF、close 和 reconnect。
 - [x] 明确 stdio 支持边界：OpenAI runtime 仅支持 Streamable HTTP/legacy SSE；Claude stdio 继续由 Claude Agent SDK 管理。
 - [ ] 对 OpenAI stdio 配置给出明确的不支持错误，不恢复已删除的简化 stdio client。
-- [ ] MCP 生命周期：验证 HTTP session 和 SSE 连接/线程均被关闭。（runtime 成功及工具加载异常路径已统一关闭 client；正常 EOF/重连仍待补）
+- [x] MCP 生命周期：验证 HTTP session、HTTP 流响应、SSE 连接/线程及 runtime 持有的 clients 均被关闭。
 - [x] 修复 `.gitignore`，确保新增测试可被 Git 发现并在后续提交中进入 CI。
 - [ ] 错误结果闭环：`max_turns`、MCP 失败和模型输出不完整时，CLI 不打印成功并返回非零退出码。
 
@@ -72,3 +72,4 @@
 | 2026-08-28 | OpenAI 多轮状态机首批测试 | `venv/bin/python -m pytest -q tests/test_openai_runtime.py tests/test_mcp_client.py`：8 passed |
 | 2026-08-28 | MCP 协议测试第二批 | HTTP SSE 增量解析/响应 ID/多行 data，legacy SSE notification/超时/线程停止；定向测试 17 passed，正常 EOF/重连待补 |
 | 2026-08-28 | Runtime MCP 生命周期 | Responses/Chat success/max_turns/模型异常及 tools/list 异常均关闭 clients；关闭失败不会伪报成功或覆盖主异常；定向测试累计 26 passed |
+| 2026-08-28 | MCP HTTP/SSE 协议收口 | 鉴权头、401/403/500、严格 ID、EOF/close/reconnect；定向测试累计 33 passed |

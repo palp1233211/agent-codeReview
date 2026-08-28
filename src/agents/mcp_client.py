@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 import queue
 import threading
 from urllib.parse import urljoin
@@ -14,6 +15,15 @@ import requests
 
 class McpClientError(RuntimeError):
     """Raised when an MCP server returns a transport or JSON-RPC error."""
+
+
+def _jsonrpc_id_matches(actual: Any, expected: int) -> bool:
+    """Match numeric JSON-RPC IDs while rejecting bool and string coercion."""
+    if isinstance(actual, bool):
+        return False
+    if isinstance(actual, int):
+        return actual == expected
+    return isinstance(actual, float) and math.isfinite(actual) and actual.is_integer() and actual == expected
 
 
 @dataclass(frozen=True)
@@ -136,7 +146,7 @@ class HttpMcpClient:
             payload = response.json()
             if not isinstance(payload, dict):
                 raise McpClientError("MCP JSON-RPC 响应不是对象")
-            if payload.get("id") != request_id:
+            if not _jsonrpc_id_matches(payload.get("id"), request_id):
                 raise McpClientError(
                     f"MCP JSON-RPC 响应 id 不匹配: expected={request_id} actual={payload.get('id')}"
                 )
@@ -156,11 +166,11 @@ class HttpMcpClient:
             if not value or value == "[DONE]":
                 continue
             payload = json.loads(value)
-            if isinstance(payload, dict) and payload.get("id") == request_id:
+            if isinstance(payload, dict) and _jsonrpc_id_matches(payload.get("id"), request_id):
                 return payload
         if data_lines:
             payload = json.loads("\n".join(data_lines))
-            if isinstance(payload, dict) and payload.get("id") == request_id:
+            if isinstance(payload, dict) and _jsonrpc_id_matches(payload.get("id"), request_id):
                 return payload
         raise McpClientError(
             f"MCP SSE 响应中没有匹配 request id={request_id} 的 JSON-RPC 数据"
@@ -316,7 +326,7 @@ class SseMcpClient:
                     raise McpClientError(f"MCP {self.server_label} {method} 超时") from exc
                 if isinstance(event, BaseException):
                     raise McpClientError(f"MCP {self.server_label} SSE 连接断开: {event}") from event
-                if event.get("id") != request_id:
+                if not _jsonrpc_id_matches(event.get("id"), request_id):
                     continue
                 if event.get("error"):
                     error = event["error"]
