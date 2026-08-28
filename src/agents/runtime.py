@@ -341,7 +341,9 @@ class OpenAIAgentRuntime:
             ]
             input_items = [*input_items, *serialized_output, *tool_outputs]
 
-        messages.append({"type": "result", "subtype": "max_turns", "content": None})
+        messages.append(
+            {"type": "result", "subtype": "max_turns", "is_error": True, "content": None}
+        )
         return messages
 
     async def _run_chat_completions(self, prompt: str, options: RuntimeOptions) -> list[dict[str, Any]]:
@@ -425,7 +427,9 @@ class OpenAIAgentRuntime:
                     }
                 )
 
-        messages.append({"type": "result", "subtype": "max_turns", "content": None})
+        messages.append(
+            {"type": "result", "subtype": "max_turns", "is_error": True, "content": None}
+        )
         return messages
 
     async def _call_tool(

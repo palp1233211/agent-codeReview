@@ -94,10 +94,18 @@ class HttpMcpClient:
             "method": method,
             "params": params,
         }
-        response = self._session.post(self.server_url, json=payload, timeout=self.timeout)
-        self._capture_session_id(response)
-        response.raise_for_status()
-        data = self._decode_response(response)
+        response = self._session.post(
+            self.server_url,
+            json=payload,
+            timeout=self.timeout,
+            stream=True,
+        )
+        try:
+            self._capture_session_id(response)
+            response.raise_for_status()
+            data = self._decode_response(response, payload["id"])
+        finally:
+            response.close()
         error = data.get("error")
         if error:
             raise McpClientError(
@@ -110,8 +118,11 @@ class HttpMcpClient:
     def _notify(self, method: str) -> None:
         payload = {"jsonrpc": "2.0", "method": method}
         response = self._session.post(self.server_url, json=payload, timeout=self.timeout)
-        self._capture_session_id(response)
-        response.raise_for_status()
+        try:
+            self._capture_session_id(response)
+            response.raise_for_status()
+        finally:
+            response.close()
 
     def _capture_session_id(self, response: requests.Response) -> None:
         session_id = response.headers.get("Mcp-Session-Id")
@@ -119,20 +130,41 @@ class HttpMcpClient:
             self._session.headers["Mcp-Session-Id"] = session_id
 
     @staticmethod
-    def _decode_response(response: requests.Response) -> dict[str, Any]:
+    def _decode_response(response: requests.Response, request_id: int) -> dict[str, Any]:
         content_type = response.headers.get("content-type", "")
         if "text/event-stream" not in content_type:
-            return response.json()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise McpClientError("MCP JSON-RPC 响应不是对象")
+            if payload.get("id") != request_id:
+                raise McpClientError(
+                    f"MCP JSON-RPC 响应 id 不匹配: expected={request_id} actual={payload.get('id')}"
+                )
+            return payload
 
-        for line in response.text.splitlines():
-            if not line.startswith("data:"):
+        data_lines: list[str] = []
+        lines = response.iter_lines(decode_unicode=True)
+        for raw_line in lines:
+            line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
                 continue
-            value = line[5:].strip()
-            if value and value != "[DONE]":
-                payload = json.loads(value)
-                if isinstance(payload, dict):
-                    return payload
-        raise McpClientError("MCP SSE 响应中没有 JSON-RPC 数据")
+            if line or not data_lines:
+                continue
+            value = "\n".join(data_lines)
+            data_lines = []
+            if not value or value == "[DONE]":
+                continue
+            payload = json.loads(value)
+            if isinstance(payload, dict) and payload.get("id") == request_id:
+                return payload
+        if data_lines:
+            payload = json.loads("\n".join(data_lines))
+            if isinstance(payload, dict) and payload.get("id") == request_id:
+                return payload
+        raise McpClientError(
+            f"MCP SSE 响应中没有匹配 request id={request_id} 的 JSON-RPC 数据"
+        )
 
     def close(self) -> None:
         self._session.close()
@@ -161,22 +193,26 @@ class SseMcpClient:
         self._events: queue.Queue[dict[str, Any] | BaseException] = queue.Queue()
         self._stream_response: requests.Response | None = None
         self._stream_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._initialize_lock = threading.Lock()
+        self._request_lock = threading.Lock()
         self._initialized = False
 
     def initialize(self) -> None:
-        if self._initialized:
-            return
-        self._connect()
-        self._request(
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "my-agent", "version": "1.0"},
-            },
-        )
-        self._notify("notifications/initialized")
-        self._initialized = True
+        with self._initialize_lock:
+            if self._initialized:
+                return
+            self._connect()
+            self._request(
+                "initialize",
+                {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "my-agent", "version": "1.0"},
+                },
+            )
+            self._notify("notifications/initialized")
+            self._initialized = True
 
     def list_tools(self) -> list[McpTool]:
         self.initialize()
@@ -199,6 +235,8 @@ class SseMcpClient:
     def _connect(self) -> None:
         if self._stream_thread is not None:
             return
+        self._events = queue.Queue()
+        self._stop_event.clear()
         ready: queue.Queue[str | BaseException] = queue.Queue(maxsize=1)
 
         def consume() -> None:
@@ -215,6 +253,8 @@ class SseMcpClient:
                 data_lines: list[str] = []
                 ready_sent = False
                 for raw_line in response.iter_lines(decode_unicode=False, delimiter=b"\n"):
+                    if self._stop_event.is_set():
+                        break
                     line = (raw_line or b"").rstrip(b"\r").decode("utf-8")
                     if line.startswith("event:"):
                         event_name = line[6:].strip()
@@ -238,6 +278,8 @@ class SseMcpClient:
                     event_name = "message"
                 if not ready_sent:
                     ready.put(McpClientError(f"MCP {self.server_label} SSE 未返回消息端点"))
+                else:
+                    self._events.put(McpClientError(f"MCP {self.server_label} SSE 流已结束"))
             except BaseException as exc:  # transport failures must wake waiting callers
                 if ready.empty():
                     ready.put(exc)
@@ -245,37 +287,45 @@ class SseMcpClient:
 
         self._stream_thread = threading.Thread(target=consume, daemon=True)
         self._stream_thread.start()
-        outcome = ready.get(timeout=self.timeout)
+        try:
+            outcome = ready.get(timeout=self.timeout)
+        except queue.Empty as exc:
+            self._stop_stream()
+            raise McpClientError(
+                f"MCP {self.server_label} SSE 连接超时，未收到消息端点"
+            ) from exc
         if isinstance(outcome, BaseException):
+            self._stop_stream()
             raise McpClientError(f"MCP {self.server_label} SSE 连接失败: {outcome}") from outcome
 
     def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        if not self._messages_url:
-            raise McpClientError(f"MCP {self.server_label} SSE 消息端点不可用")
-        request_id = next(self._request_ids)
-        response = self._session.post(
-            self._messages_url,
-            json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        while True:
-            try:
-                event = self._events.get(timeout=self.timeout)
-            except queue.Empty as exc:
-                raise McpClientError(f"MCP {self.server_label} {method} 超时") from exc
-            if isinstance(event, BaseException):
-                raise McpClientError(f"MCP {self.server_label} SSE 连接断开: {event}") from event
-            if event.get("id") != request_id:
-                continue
-            if event.get("error"):
-                error = event["error"]
-                raise McpClientError(
-                    f"MCP {self.server_label} {method} 失败: "
-                    f"{error.get('message') or json.dumps(error, ensure_ascii=False)}"
-                )
-            result = event.get("result", {})
-            return result if isinstance(result, dict) else {"content": result}
+        with self._request_lock:
+            if not self._messages_url:
+                raise McpClientError(f"MCP {self.server_label} SSE 消息端点不可用")
+            request_id = next(self._request_ids)
+            response = self._session.post(
+                self._messages_url,
+                json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            while True:
+                try:
+                    event = self._events.get(timeout=self.timeout)
+                except queue.Empty as exc:
+                    raise McpClientError(f"MCP {self.server_label} {method} 超时") from exc
+                if isinstance(event, BaseException):
+                    raise McpClientError(f"MCP {self.server_label} SSE 连接断开: {event}") from event
+                if event.get("id") != request_id:
+                    continue
+                if event.get("error"):
+                    error = event["error"]
+                    raise McpClientError(
+                        f"MCP {self.server_label} {method} 失败: "
+                        f"{error.get('message') or json.dumps(error, ensure_ascii=False)}"
+                    )
+                result = event.get("result", {})
+                return result if isinstance(result, dict) else {"content": result}
 
     def _notify(self, method: str) -> None:
         if not self._messages_url:
@@ -287,9 +337,21 @@ class SseMcpClient:
         )
         response.raise_for_status()
 
-    def close(self) -> None:
+    def _stop_stream(self) -> None:
+        self._stop_event.set()
         if self._stream_response is not None:
             self._stream_response.close()
+        thread = self._stream_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=min(self.timeout, 1.0))
+        if thread is not None and thread.is_alive():
+            raise McpClientError(f"MCP {self.server_label} SSE 消费线程未能停止")
+        self._stream_thread = None
+        self._stream_response = None
+        self._messages_url = None
+
+    def close(self) -> None:
+        self._stop_stream()
         self._stream_session.close()
         self._session.close()
         self._initialized = False
