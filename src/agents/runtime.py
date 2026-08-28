@@ -8,6 +8,7 @@ import os
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,38 @@ def agent_tool(name: str, description: str, input_schema: dict[str, Any]):
 
 def get_registered_tool(name: str) -> ToolDefinition | None:
     return _TOOLS.get(name)
+
+
+def _tool_is_allowed(
+    name: str,
+    allowed_tools: list[str] | tuple[str, ...],
+    disallowed_tools: list[str] | tuple[str, ...],
+) -> bool:
+    if name in disallowed_tools:
+        return False
+    return not allowed_tools or name in allowed_tools
+
+
+_CLAUDE_LOCAL_TOOL_PREFIX = "mcp__local-tools__"
+
+
+def _claude_local_tool_policy_names(name: str) -> tuple[str, ...]:
+    if name.startswith(_CLAUDE_LOCAL_TOOL_PREFIX):
+        bare_name = name.removeprefix(_CLAUDE_LOCAL_TOOL_PREFIX)
+        return (name, bare_name) if bare_name else (name,)
+    if name in _TOOLS and name not in {"Read", "Grep", "Glob"}:
+        return (name, f"{_CLAUDE_LOCAL_TOOL_PREFIX}{name}")
+    return (name,)
+
+
+def _tool_policy_allows_any_name(
+    names: tuple[str, ...],
+    allowed_tools: list[str] | tuple[str, ...],
+    disallowed_tools: list[str] | tuple[str, ...],
+) -> bool:
+    if any(name in disallowed_tools for name in names):
+        return False
+    return not allowed_tools or any(name in allowed_tools for name in names)
 
 
 def _progress(options: RuntimeOptions, message: str) -> None:
@@ -284,11 +317,16 @@ class OpenAIAgentRuntime:
         tools = [
             definition.as_openai_tool()
             for name, definition in _TOOLS.items()
-            if not allowed or name in allowed
+            if _tool_is_allowed(name, options.allowed_tools, options.disallowed_tools)
         ]
-        if options.agents and (not allowed or "Agent" in allowed):
+        if options.agents and _tool_is_allowed("Agent", options.allowed_tools, options.disallowed_tools):
             tools.append(_openai_agent_tool_schema(options.allowed_agents or sorted(options.agents)))
-        mcp_tools = await self._load_mcp_tools(options, allowed, client_sink=mcp_clients)
+        mcp_tools = await self._load_mcp_tools(
+            options,
+            allowed,
+            disallowed=set(options.disallowed_tools),
+            client_sink=mcp_clients,
+        )
         tools.extend(tool_schema for tool_schema, _, _ in mcp_tools.values())
         _progress(
             options,
@@ -354,6 +392,8 @@ class OpenAIAgentRuntime:
                         verbose=options.verbose,
                         progress_prefix=options.progress_prefix,
                         mcp_tools=mcp_tools,
+                        allowed_tools=options.allowed_tools,
+                        disallowed_tools=options.disallowed_tools,
                     )
                     operation_key = _tool_operation_key(tool_name, args)
                     tool_error = _tool_error_message(result)
@@ -452,14 +492,15 @@ class OpenAIAgentRuntime:
                 },
             }
             for name, definition in _TOOLS.items()
-            if not allowed or name in allowed
+            if _tool_is_allowed(name, options.allowed_tools, options.disallowed_tools)
         ]
-        if options.agents and (not allowed or "Agent" in allowed):
+        if options.agents and _tool_is_allowed("Agent", options.allowed_tools, options.disallowed_tools):
             tools.append({"type": "function", "function": _openai_agent_function_schema(options.allowed_agents or sorted(options.agents))})
         mcp_tools = await self._load_mcp_tools(
             options,
             allowed,
             chat_completions=True,
+            disallowed=set(options.disallowed_tools),
             client_sink=mcp_clients,
         )
         tools.extend(tool_schema for tool_schema, _, _ in mcp_tools.values())
@@ -533,6 +574,8 @@ class OpenAIAgentRuntime:
                     verbose=options.verbose,
                     progress_prefix=options.progress_prefix,
                     mcp_tools=mcp_tools,
+                    allowed_tools=options.allowed_tools,
+                    disallowed_tools=options.disallowed_tools,
                 )
                 operation_key = _tool_operation_key(tool_name, args)
                 tool_error = _tool_error_message(result)
@@ -567,7 +610,11 @@ class OpenAIAgentRuntime:
         mcp_tools: dict[
             str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient, McpTool]
         ] | None = None,
+        allowed_tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
     ) -> Any:
+        if not _tool_is_allowed(name, allowed_tools or [], disallowed_tools or []):
+            return {"error": f"工具未获准执行: {name}"}
         if name == "Agent":
             _progress_from_values(progress_prefix, verbose, f"调用子 Agent: {_summarize_tool_args(args)}")
             try:
@@ -577,6 +624,7 @@ class OpenAIAgentRuntime:
                     hooks=hooks or {},
                     agents=agents or {},
                     max_turns=max_turns,
+                    disallowed_tools=disallowed_tools or [],
                 )
             except Exception as exc:
                 _progress_from_values(progress_prefix, verbose, f"子 Agent 失败: error={exc}")
@@ -636,6 +684,7 @@ class OpenAIAgentRuntime:
         allowed: set[str],
         *,
         chat_completions: bool = False,
+        disallowed: set[str] | None = None,
         client_sink: list[HttpMcpClient | SseMcpClient] | None = None,
     ) -> dict[
         str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient, McpTool]
@@ -647,7 +696,12 @@ class OpenAIAgentRuntime:
             if client_sink is not None:
                 client_sink.append(client)
             tools = await asyncio.to_thread(client.list_tools)
-            selected = [tool for tool in tools if not allowed or tool.exposed_name in allowed]
+            selected = [
+                tool
+                for tool in tools
+                if (not allowed or tool.exposed_name in allowed)
+                and tool.exposed_name not in (disallowed or set())
+            ]
             _progress(
                 options,
                 f"MCP 工具导入: server={client.server_label} count={len(selected)}/{len(tools)}",
@@ -694,6 +748,7 @@ class OpenAIAgentRuntime:
         hooks: dict[str, list[dict[str, Any]]],
         agents: dict[str, AgentSpec],
         max_turns: int,
+        disallowed_tools: list[str] | None = None,
     ) -> dict[str, Any]:
         agent_name = (
             args.get("subagent_type")
@@ -715,6 +770,7 @@ class OpenAIAgentRuntime:
                     hooks=hooks,
                     cwd=cwd,
                     max_turns=max(1, max_turns - 1),
+                    disallowed_tools=list(disallowed_tools or []),
                 ),
             )
         summary = ""
@@ -827,7 +883,7 @@ def _matching_hooks(
     matched = []
     for matcher in hooks.get(event_name, []):
         pattern = matcher.get("matcher")
-        if pattern and pattern != tool_name:
+        if pattern and not fnmatchcase(tool_name, str(pattern)):
             continue
         matched.extend(matcher.get("hooks", []))
     return matched
@@ -852,11 +908,29 @@ class ClaudeAgentRuntime:
         )
 
         messages: list[dict[str, Any]] = []
+        effective_allowed_tools = [
+            tool_name
+            for tool_name in options.allowed_tools
+            if _tool_policy_allows_any_name(
+                _claude_local_tool_policy_names(tool_name),
+                options.allowed_tools,
+                options.disallowed_tools,
+            )
+        ]
         agents = {
             name: AgentDefinition(
                 description=spec.description,
                 prompt=spec.prompt,
-                tools=list(spec.tools),
+                tools=[
+                    tool_name
+                    for tool_name in spec.tools
+                    if _tool_policy_allows_any_name(
+                        _claude_local_tool_policy_names(tool_name),
+                        [],
+                        options.disallowed_tools,
+                    )
+                ],
+                disallowedTools=list(options.disallowed_tools) or None,
             )
             for name, spec in options.agents.items()
         }
@@ -868,7 +942,8 @@ class ClaudeAgentRuntime:
                 input_schema=definition.input_schema,
             )(definition.func)
             for name, definition in _TOOLS.items()
-            if name not in {"Read", "Grep", "Glob"} and (not options.allowed_tools or name in options.allowed_tools)
+            if name not in {"Read", "Grep", "Glob"}
+            and _tool_is_allowed(name, options.allowed_tools, options.disallowed_tools)
         ]
         mcp_servers = dict(options.claude_mcp_servers)
         if local_tools:
@@ -879,10 +954,15 @@ class ClaudeAgentRuntime:
             )
 
         async def can_use_tool(tool_name: str, tool_input: dict[str, Any], _context: Any):
-            if options.allowed_tools and tool_name not in options.allowed_tools:
+            policy_names = _claude_local_tool_policy_names(tool_name)
+            if not _tool_policy_allows_any_name(
+                policy_names,
+                options.allowed_tools,
+                options.disallowed_tools,
+            ):
                 _progress(
                     options,
-                    f"拒绝非白名单工具: {tool_name} {_summarize_tool_args(tool_input)}",
+                    f"拒绝未授权工具: {tool_name} {_summarize_tool_args(tool_input)}",
                 )
                 return PermissionResultDeny(
                     message=f"Tool {tool_name} is not allowed for this run.",
@@ -892,12 +972,12 @@ class ClaudeAgentRuntime:
 
         _progress(
             options,
-            f"Claude SDK 启动，allowed_tools={len(options.allowed_tools)}，mcp_servers={', '.join(sorted(mcp_servers)) or 'none'}",
+            f"Claude SDK 启动，allowed_tools={len(effective_allowed_tools)}，mcp_servers={', '.join(sorted(mcp_servers)) or 'none'}",
         )
 
         claude_options = ClaudeAgentOptions(
-            tools=options.allowed_tools or None,
-            allowed_tools=options.allowed_tools,
+            tools=effective_allowed_tools or None,
+            allowed_tools=effective_allowed_tools,
             disallowed_tools=options.disallowed_tools,
             permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions"),
             hooks=options.hooks,

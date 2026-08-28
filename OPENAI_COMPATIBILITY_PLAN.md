@@ -37,9 +37,9 @@
 
 ## Phase 2：Hooks、权限与文件边界
 
-- [ ] 支持 hook matcher 通配符，例如 `mcp__yunxiao__*`。
+- [x] 支持 hook matcher 通配符，例如 `mcp__yunxiao__*`。
 - [ ] 对齐 OpenAI runtime 的 PreToolUse、PostToolUse、UserPromptSubmit 和 PermissionRequest 行为。
-- [ ] 正确执行 `allowed_tools` 与 `disallowed_tools`。
+- [x] 正确执行 `allowed_tools` 与 `disallowed_tools`，并在 schema 和执行层双重限制。
 - [ ] `Read`、`Grep`、`Glob` 限制在配置的 `cwd` 内。
 - [ ] 覆盖绝对路径、`../` 和符号链接越界测试。
 
@@ -77,3 +77,4 @@
 | 2026-08-28 | OpenAI stdio 配置边界 | reviewer 和 MCP factory 均明确拒绝 stdio/未知 transport；Claude stdio 不受影响 |
 | 2026-08-28 | 错误状态和 CLI 退出码 | 未恢复工具错误为 tool_error，同操作重试成功可恢复；MCP isError 和子 Agent 错误透传；三个审查命令非零退出；定向测试累计 70 passed |
 | 2026-08-28 | 完整测试收集恢复 | 迁移 clean_claude_env 测试、删除旧 src.models schema 测试并重写 reviewer runtime 测试；全量 283 passed |
+| 2026-08-28 | Hook matcher 与工具权限 | fnmatch 通配符；disallowed 优先；OpenAI/Claude schema 和执行层限制；子 Agent 继承禁止项 |
