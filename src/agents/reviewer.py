@@ -317,14 +317,11 @@ class CodeReviewAgent:
             None,
         )
 
-        result_type = None
-        is_error = False
+        result_type = "incomplete"
+        is_error = True
         if result_msg:
             is_error = bool(result_msg.get("is_error"))
-            if is_error:
-                result_type = "error"
-            else:
-                result_type = result_msg.get("subtype")
+            result_type = result_msg.get("subtype") or ("error" if is_error else "success")
 
         # 提取 assistant 最终输出（最后一条 assistant 消息）
         final_output = ""
@@ -332,6 +329,9 @@ class CodeReviewAgent:
             if msg.get("type") == "assistant":
                 final_output = "\n".join(msg.get("content", []))
                 break
+        if not final_output.strip() and (result_msg is None or not is_error):
+            is_error = True
+            result_type = "incomplete"
 
         # 提取使用过的工具列表
         tools_used = [

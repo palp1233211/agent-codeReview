@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -16,6 +16,15 @@ from src.agents.runtime import OpenAIAgentRuntime, RuntimeOptions, agent_tool
 )
 async def _test_echo(value: str) -> dict[str, str]:
     return {"echo": value}
+
+
+@agent_tool(
+    name="TestBoom",
+    description="Raise an error for runtime recovery tests.",
+    input_schema={},
+)
+async def _test_boom() -> None:
+    raise RuntimeError("boom")
 
 
 class _ResponseItem(SimpleNamespace):
@@ -355,3 +364,260 @@ async def test_openai_runtime_preserves_primary_error_when_close_also_fails(monk
             "review",
             RuntimeOptions(remote_mcp_servers=[{"server_url": "https://example.test/mcp"}]),
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["responses", "chat"])
+async def test_openai_modes_report_empty_final_output_as_incomplete(api_mode: str):
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.api_mode = api_mode
+    if api_mode == "responses":
+        runtime._client = SimpleNamespace(
+            responses=SimpleNamespace(
+                create=Mock(return_value=SimpleNamespace(output=[], output_text=""))
+            )
+        )
+    else:
+        runtime._client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=Mock(
+                        return_value=SimpleNamespace(
+                            choices=[SimpleNamespace(message=_ChatMessage(content=None, tool_calls=[]))]
+                        )
+                    )
+                )
+            )
+        )
+
+    messages = await runtime.run("review", RuntimeOptions(max_turns=1))
+
+    assert messages[-1] == {
+        "type": "result",
+        "subtype": "incomplete",
+        "is_error": True,
+        "content": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["responses", "chat"])
+@pytest.mark.parametrize(
+    ("tool_name", "expected_error"),
+    [("UnknownTool", "未知工具"), ("TestBoom", "boom")],
+)
+async def test_openai_modes_mark_unrecovered_tool_errors(
+    api_mode: str,
+    tool_name: str,
+    expected_error: str,
+):
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.api_mode = api_mode
+    if api_mode == "responses":
+        call = _function_call("call-error", "A")
+        call.name = tool_name
+        call.arguments = "{}"
+        call.serialized["name"] = tool_name
+        call.serialized["arguments"] = "{}"
+        create = Mock(
+            side_effect=[
+                SimpleNamespace(output=[call], output_text=""),
+                SimpleNamespace(output=[_message("recovered")], output_text="recovered"),
+            ]
+        )
+        runtime._client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    else:
+        tool_call = _chat_tool_call("call-error", "A")
+        tool_call.function.name = tool_name
+        tool_call.function.arguments = "{}"
+        create = Mock(
+            side_effect=[
+                SimpleNamespace(
+                    choices=[SimpleNamespace(message=_ChatMessage(content=None, tool_calls=[tool_call]))]
+                ),
+                SimpleNamespace(
+                    choices=[SimpleNamespace(message=_ChatMessage(content="recovered", tool_calls=[]))]
+                ),
+            ]
+        )
+        runtime._client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+
+    messages = await runtime.run(
+        "review",
+        RuntimeOptions(allowed_tools=[tool_name], max_turns=2),
+    )
+
+    assert messages[-1]["subtype"] == "tool_error"
+    assert messages[-1]["is_error"] is True
+    request = create.call_args_list[1].kwargs
+    transcript = request.get("input") or request.get("messages")
+    assert expected_error in str(transcript)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["responses", "chat"])
+async def test_openai_modes_clear_tool_error_after_same_tool_succeeds(api_mode: str):
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.api_mode = api_mode
+    runtime._call_tool = AsyncMock(side_effect=[{"error": "temporary"}, {"ok": True}])  # noqa: SLF001
+    if api_mode == "responses":
+        create = Mock(
+            side_effect=[
+                SimpleNamespace(output=[_function_call("call-a", "A")], output_text=""),
+                SimpleNamespace(output=[_function_call("call-b", "A")], output_text=""),
+                SimpleNamespace(output=[_message("recovered")], output_text="recovered"),
+            ]
+        )
+        runtime._client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    else:
+        create = Mock(
+            side_effect=[
+                SimpleNamespace(
+                    choices=[SimpleNamespace(message=_ChatMessage(content=None, tool_calls=[_chat_tool_call("call-a", "A")]))]
+                ),
+                SimpleNamespace(
+                    choices=[SimpleNamespace(message=_ChatMessage(content=None, tool_calls=[_chat_tool_call("call-b", "A")]))]
+                ),
+                SimpleNamespace(
+                    choices=[SimpleNamespace(message=_ChatMessage(content="recovered", tool_calls=[]))]
+                ),
+            ]
+        )
+        runtime._client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+
+    messages = await runtime.run(
+        "review",
+        RuntimeOptions(allowed_tools=["TestEcho"], max_turns=3),
+    )
+
+    assert messages[-1]["subtype"] == "success"
+    assert runtime._call_tool.await_count == 2  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["responses", "chat"])
+async def test_openai_modes_do_not_clear_failure_for_different_tool_arguments(api_mode: str):
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.api_mode = api_mode
+    runtime._call_tool = AsyncMock(side_effect=[{"error": "A failed"}, {"ok": True}])  # noqa: SLF001
+    if api_mode == "responses":
+        runtime._client = SimpleNamespace(
+            responses=SimpleNamespace(
+                create=Mock(
+                    side_effect=[
+                        SimpleNamespace(output=[_function_call("call-a", "A")], output_text=""),
+                        SimpleNamespace(output=[_function_call("call-b", "B")], output_text=""),
+                        SimpleNamespace(output=[_message("partial")], output_text="partial"),
+                    ]
+                )
+            )
+        )
+    else:
+        runtime._client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=Mock(
+                        side_effect=[
+                            SimpleNamespace(
+                                choices=[SimpleNamespace(message=_ChatMessage(content=None, tool_calls=[_chat_tool_call("call-a", "A")]))]
+                            ),
+                            SimpleNamespace(
+                                choices=[SimpleNamespace(message=_ChatMessage(content=None, tool_calls=[_chat_tool_call("call-b", "B")]))]
+                            ),
+                            SimpleNamespace(
+                                choices=[SimpleNamespace(message=_ChatMessage(content="partial", tool_calls=[]))]
+                            ),
+                        ]
+                    )
+                )
+            )
+        )
+
+    messages = await runtime.run("review", RuntimeOptions(allowed_tools=["TestEcho"], max_turns=3))
+
+    assert messages[-1]["subtype"] == "tool_error"
+    assert "A failed" in str(messages[-1]["errors"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["responses", "chat"])
+async def test_openai_modes_treat_mcp_is_error_result_as_tool_error(api_mode: str):
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.api_mode = api_mode
+    runtime._call_tool = AsyncMock(  # noqa: SLF001
+        return_value={"isError": True, "content": [{"type": "text", "text": "MCP denied"}]}
+    )
+    if api_mode == "responses":
+        runtime._client = SimpleNamespace(
+            responses=SimpleNamespace(
+                create=Mock(
+                    side_effect=[
+                        SimpleNamespace(output=[_function_call("call-a", "A")], output_text=""),
+                        SimpleNamespace(output=[_message("cannot review")], output_text="cannot review"),
+                    ]
+                )
+            )
+        )
+    else:
+        runtime._client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=Mock(
+                        side_effect=[
+                            SimpleNamespace(
+                                choices=[SimpleNamespace(message=_ChatMessage(content=None, tool_calls=[_chat_tool_call("call-a", "A")]))]
+                            ),
+                            SimpleNamespace(
+                                choices=[SimpleNamespace(message=_ChatMessage(content="cannot review", tool_calls=[]))]
+                            ),
+                        ]
+                    )
+                )
+            )
+        )
+
+    messages = await runtime.run("review", RuntimeOptions(allowed_tools=["TestEcho"], max_turns=2))
+
+    assert messages[-1]["subtype"] == "tool_error"
+    assert "MCP denied" in str(messages[-1]["errors"])
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_converts_subagent_exception_to_tool_error():
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime._call_subagent = AsyncMock(side_effect=RuntimeError("subagent crashed"))  # noqa: SLF001
+
+    result = await runtime._call_tool(  # noqa: SLF001
+        "Agent",
+        {"subagent_type": "quality", "prompt": "review"},
+        cwd=".",
+        agents={"quality": SimpleNamespace()},
+    )
+
+    assert result == {"error": "子 Agent 执行失败: subagent crashed"}
+
+
+@pytest.mark.asyncio
+async def test_subagent_error_result_is_returned_as_tool_error():
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.run = AsyncMock(  # type: ignore[method-assign]
+        return_value=[
+            {"type": "assistant", "content": ["partial"]},
+            {"type": "result", "subtype": "max_turns", "is_error": True},
+        ]
+    )
+
+    result = await runtime._call_subagent(  # noqa: SLF001
+        {"subagent_type": "quality", "prompt": "review"},
+        cwd=".",
+        hooks={},
+        agents={"quality": SimpleNamespace(tools=())},
+        max_turns=3,
+    )
+
+    assert result["subtype"] == "max_turns"
+    assert "error" in result

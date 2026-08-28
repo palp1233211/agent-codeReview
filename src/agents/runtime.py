@@ -127,6 +127,29 @@ def _summarize_tool_result(result: Any) -> str:
     return f"type={type(result).__name__}"
 
 
+def _tool_operation_key(name: str, args: dict[str, Any]) -> str:
+    return f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)}"
+
+
+def _tool_error_message(result: Any) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    if result.get("error"):
+        return str(result["error"])
+    if not (result.get("isError") or result.get("is_error")):
+        return None
+    content = result.get("content")
+    if isinstance(content, list):
+        text_parts = [
+            str(item.get("text"))
+            for item in content
+            if isinstance(item, dict) and item.get("text")
+        ]
+        if text_parts:
+            return "\n".join(text_parts)
+    return "工具返回错误状态"
+
+
 def _safe_path(path: str, cwd: Path) -> Path:
     candidate = Path(path)
     if not candidate.is_absolute():
@@ -284,6 +307,7 @@ class OpenAIAgentRuntime:
             input_items.insert(0, {"role": "system", "content": system_prompt})
 
         messages: list[dict[str, Any]] = []
+        unresolved_tool_errors: dict[str, str] = {}
 
         for _ in range(options.max_turns):
             response = await asyncio.to_thread(
@@ -331,6 +355,12 @@ class OpenAIAgentRuntime:
                         progress_prefix=options.progress_prefix,
                         mcp_tools=mcp_tools,
                     )
+                    operation_key = _tool_operation_key(tool_name, args)
+                    tool_error = _tool_error_message(result)
+                    if tool_error:
+                        unresolved_tool_errors[operation_key] = tool_error
+                    else:
+                        unresolved_tool_errors.pop(operation_key, None)
                     tool_outputs.append(
                         {
                             "type": "function_call_output",
@@ -346,7 +376,28 @@ class OpenAIAgentRuntime:
 
             if not tool_outputs:
                 _progress(options, "OpenAI Responses 完成，未等待更多工具结果")
-                messages.append({"type": "result", "subtype": "success", "content": _response_text(response)})
+                final_text = _response_text(response)
+                if unresolved_tool_errors:
+                    messages.append(
+                        {
+                            "type": "result",
+                            "subtype": "tool_error",
+                            "is_error": True,
+                            "content": final_text or None,
+                            "errors": dict(unresolved_tool_errors),
+                        }
+                    )
+                elif final_text:
+                    messages.append({"type": "result", "subtype": "success", "content": final_text})
+                else:
+                    messages.append(
+                        {
+                            "type": "result",
+                            "subtype": "incomplete",
+                            "is_error": True,
+                            "content": None,
+                        }
+                    )
                 return messages
 
             # Some OpenAI-compatible providers do not retain function calls behind
@@ -427,6 +478,7 @@ class OpenAIAgentRuntime:
         chat_messages.append({"role": "user", "content": prompt})
 
         messages: list[dict[str, Any]] = []
+        unresolved_tool_errors: dict[str, str] = {}
         for _ in range(options.max_turns):
             response = await asyncio.to_thread(
                 self.client.chat.completions.create,
@@ -442,7 +494,27 @@ class OpenAIAgentRuntime:
             tool_calls = choice.tool_calls or []
             if not tool_calls:
                 _progress(options, "OpenAI Chat Completions 完成，未等待更多工具结果")
-                messages.append({"type": "result", "subtype": "success", "content": content})
+                if unresolved_tool_errors:
+                    messages.append(
+                        {
+                            "type": "result",
+                            "subtype": "tool_error",
+                            "is_error": True,
+                            "content": content or None,
+                            "errors": dict(unresolved_tool_errors),
+                        }
+                    )
+                elif content:
+                    messages.append({"type": "result", "subtype": "success", "content": content})
+                else:
+                    messages.append(
+                        {
+                            "type": "result",
+                            "subtype": "incomplete",
+                            "is_error": True,
+                            "content": None,
+                        }
+                    )
                 return messages
 
             chat_messages.append(choice.model_dump(exclude_none=True))
@@ -462,6 +534,12 @@ class OpenAIAgentRuntime:
                     progress_prefix=options.progress_prefix,
                     mcp_tools=mcp_tools,
                 )
+                operation_key = _tool_operation_key(tool_name, args)
+                tool_error = _tool_error_message(result)
+                if tool_error:
+                    unresolved_tool_errors[operation_key] = tool_error
+                else:
+                    unresolved_tool_errors.pop(operation_key, None)
                 chat_messages.append(
                     {
                         "role": "tool",
@@ -492,7 +570,17 @@ class OpenAIAgentRuntime:
     ) -> Any:
         if name == "Agent":
             _progress_from_values(progress_prefix, verbose, f"调用子 Agent: {_summarize_tool_args(args)}")
-            return await self._call_subagent(args, cwd=cwd, hooks=hooks or {}, agents=agents or {}, max_turns=max_turns)
+            try:
+                return await self._call_subagent(
+                    args,
+                    cwd=cwd,
+                    hooks=hooks or {},
+                    agents=agents or {},
+                    max_turns=max_turns,
+                )
+            except Exception as exc:
+                _progress_from_values(progress_prefix, verbose, f"子 Agent 失败: error={exc}")
+                return {"error": f"子 Agent 执行失败: {exc}"}
 
         mcp_entry = (mcp_tools or {}).get(name)
         if mcp_entry:
@@ -634,6 +722,18 @@ class OpenAIAgentRuntime:
             if message.get("type") == "assistant":
                 summary = "\n".join(message.get("content", []))
                 break
+        result_message = next(
+            (message for message in reversed(messages) if message.get("type") == "result"),
+            None,
+        )
+        if not result_message or result_message.get("is_error"):
+            subtype = result_message.get("subtype") if result_message else "incomplete"
+            return {
+                "error": f"子 Agent {agent_name} 未完成: {subtype}",
+                "agent": agent_name,
+                "subtype": subtype,
+                "raw_messages": messages,
+            }
         return {"agent": agent_name, "summary": summary, "raw_messages": messages}
 
 

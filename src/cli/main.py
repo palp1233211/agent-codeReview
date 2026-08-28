@@ -51,7 +51,7 @@ async def cmd_yunxiao_mr(
     dimensions: list[str] | None,
     auto_comment: bool,
     business_type: str,
-) -> None:
+) -> int:
     """审查云效 MR，直接调用 CodeReviewAgent"""
     from src.agents.reviewer import CodeReviewAgent, _normalize_yunxiao_repository_id
 
@@ -83,6 +83,18 @@ async def cmd_yunxiao_mr(
         if "comment_on_yunxiao_mr" in t or "create_change_request_comment" in t
     ]
 
+    if result.get("is_error"):
+        result_type = result.get("result_type") or "error"
+        print("=" * 50)
+        print(f"❌ 审查失败（{result_type}）")
+        print("=" * 50)
+        summary = result.get("summary")
+        if summary:
+            print("\n📝 当前输出:")
+            print("-" * 40)
+            print(summary)
+        return 1
+
     print("=" * 50)
     print("✅ 审查完成")
     print("=" * 50)
@@ -98,6 +110,7 @@ async def cmd_yunxiao_mr(
     print("-" * 40)
     summary = result.get("summary", "（无摘要）")
     print(summary)
+    return 0
 
 
 def cmd_lark_bot() -> int:
@@ -181,7 +194,7 @@ async def cmd_bi_weekly_doc(date_str: str | None = None) -> None:
     print(f"  菲律宾文档：{result['ph_url']}")
 
 
-async def cmd_files(file_paths: list[str], dimensions: list[str] | None) -> None:
+async def cmd_files(file_paths: list[str], dimensions: list[str] | None) -> int:
     """审查本地文件"""
     from src.agents.reviewer import CodeReviewAgent
 
@@ -191,11 +204,15 @@ async def cmd_files(file_paths: list[str], dimensions: list[str] | None) -> None
         file_paths=file_paths,
         dimensions=dimensions if dimensions and "all" not in dimensions else None,
     )
+    if result.get("is_error"):
+        print(f"\n❌ 审查失败（{result.get('result_type') or 'error'}）")
+        return 1
     print("\n📝 审查结果:")
     print(result.get("summary", "（无摘要）"))
+    return 0
 
 
-async def cmd_diff(base: str, target: str, dimensions: list[str] | None) -> None:
+async def cmd_diff(base: str, target: str, dimensions: list[str] | None) -> int:
     """审查 Git diff"""
     from src.agents.reviewer import CodeReviewAgent
 
@@ -206,8 +223,12 @@ async def cmd_diff(base: str, target: str, dimensions: list[str] | None) -> None
         target_branch=target,
         dimensions=dimensions if dimensions and "all" not in dimensions else None,
     )
+    if result.get("is_error"):
+        print(f"\n❌ 审查失败（{result.get('result_type') or 'error'}）")
+        return 1
     print("\n📝 审查结果:")
     print(result.get("summary", "（无摘要）"))
+    return 0
 
 
 def main():
@@ -304,18 +325,18 @@ def main():
     print("=" * 50)
 
     if args.command == "yunxiao-mr":
-        asyncio.run(cmd_yunxiao_mr(
+        sys.exit(asyncio.run(cmd_yunxiao_mr(
             repository_id=args.repository,
             local_id=args.mr_id,
             organization_id=args.organization or os.getenv("YUNXIAO_ORG_ID", "5ea86562f89c9700014a671f"),
             dimensions=args.dimensions,
             auto_comment=not args.no_comment,
             business_type=args.business,
-        ))
+        )))
     elif args.command == "files":
-        asyncio.run(cmd_files(args.paths, args.dimensions))
+        sys.exit(asyncio.run(cmd_files(args.paths, args.dimensions)))
     elif args.command == "diff":
-        asyncio.run(cmd_diff(args.base, args.target, args.dimensions))
+        sys.exit(asyncio.run(cmd_diff(args.base, args.target, args.dimensions)))
     else:
         parser.print_help()
 
