@@ -54,7 +54,7 @@
 ## Phase 4：依赖、旧代码和文档收口
 
 - [ ] 决定默认 Provider 是否继续为 Claude。
-- [ ] Claude/OpenAI SDK 改为按 Provider 延迟导入或 optional dependencies。
+- [x] Claude/OpenAI SDK 改为按 Provider 延迟导入或 optional dependencies。
 - [ ] 评估 OpenAI-only 镜像是否仍需 Node.js 和 Claude CLI。
 - [ ] 统一 Claude/OpenAI 的云效 MCP 配置构建逻辑。
 - [ ] 删除或实现 `src/tools/yunxiao_tools.py` 中的占位工具。
@@ -82,3 +82,4 @@
 | 2026-08-28 | OpenAI Hook 行为对齐 | UserPromptSubmit 注入 prompt；PermissionRequest 可短路工具执行；Agent 工具触发 PostToolUse；全量 310 passed |
 | 2026-08-28 | OpenAI 启动前配置检查 | OpenAI provider 缺 API key/model 失败；openai_sdk 缺 base URL 失败；云效 MR 缺 MCP URL/token 失败；CLI 仅 yunxiao-mr 要求云效 MCP；定向测试 29 passed，全量 316 passed |
 | 2026-08-28 | OpenAI-compatible endpoint smoke | 使用项目 OpenAI runtime 发起无工具 Responses 请求，模型返回 OK，退出码 0；真实云效 MCP 当前网络连接超时，initialize/tools-list 保持未完成 |
+| 2026-08-28 | SDK 依赖按 Provider 延迟检查 | CLI 不再顶层同时导入 OpenAI/Claude SDK；OpenAI provider 不要求 Claude SDK，Claude provider 不要求 OpenAI SDK；定向测试 32 passed，全量 319 passed |

@@ -79,6 +79,41 @@ def test_cli_openai_yunxiao_requires_mcp_settings(monkeypatch):
     assert exc.value.code == 1
 
 
+def test_cli_openai_provider_does_not_require_claude_sdk(monkeypatch):
+    def fake_find_spec(module_name):
+        return object() if module_name == "openai" else None
+
+    monkeypatch.setattr(cli_main.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setenv("AGENT_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+
+    cli_main._check_env("files")  # noqa: SLF001
+
+
+def test_cli_claude_provider_does_not_require_openai_sdk(monkeypatch):
+    def fake_find_spec(module_name):
+        return object() if module_name == "claude_agent_sdk" else None
+
+    monkeypatch.setattr(cli_main.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setenv("AGENT_PROVIDER", "claude")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    cli_main._check_env("files")  # noqa: SLF001
+
+
+def test_cli_current_provider_requires_matching_sdk(monkeypatch):
+    monkeypatch.setattr(cli_main.importlib.util, "find_spec", lambda _module_name: None)
+    monkeypatch.setenv("AGENT_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+
+    with pytest.raises(SystemExit) as exc:
+        cli_main._check_env("files")  # noqa: SLF001
+
+    assert exc.value.code == 1
+
+
 def test_openai_yunxiao_stdio_configuration_is_rejected(monkeypatch):
     monkeypatch.setenv("YUNXIAO_MCP_TRANSPORT", "stdio")
     monkeypatch.delenv("YUNXIAO_MCP_URL", raising=False)

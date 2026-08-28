@@ -4,6 +4,7 @@ Code Review CLI - 支持 Claude Agent SDK / OpenAI SDK
 """
 import asyncio
 import argparse
+import importlib.util
 import os
 import sys
 from dotenv import load_dotenv
@@ -11,12 +12,12 @@ from dotenv import load_dotenv
 # 强制覆盖系统环境变量，确保 .env 优先
 load_dotenv(override=True)
 
-try:
-    from openai import OpenAI  # noqa: F401
-    from claude_agent_sdk import query as _claude_query  # noqa: F401
-except ImportError:
-    print("❌ 错误: 请先安装项目依赖")
-    print("   pip install -r requirements.txt")
+
+def _require_dependency(module_name: str, install_hint: str) -> None:
+    if importlib.util.find_spec(module_name) is not None:
+        return
+    print(f"❌ 错误: 当前 Provider 需要安装 {module_name}")
+    print(f"   {install_hint}")
     sys.exit(1)
 
 
@@ -24,6 +25,8 @@ def _check_env(command: str | None = None):
     provider = (os.getenv("AGENT_PROVIDER") or os.getenv("AGENT_SDK") or "claude").lower()
     print(f"🧭 Provider: {provider}")
     if provider in {"openai", "openai_sdk"}:
+        _require_dependency("openai", "pip install openai")
+
         from src.agents.reviewer import validate_openai_runtime_config
 
         try:
@@ -42,6 +45,8 @@ def _check_env(command: str | None = None):
             print("🔗 API endpoint: OpenAI 官方默认")
         print(f"🤖 Model: {model}")
         return
+
+    _require_dependency("claude_agent_sdk", "pip install claude-agent-sdk")
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     base_url = os.getenv("ANTHROPIC_BASE_URL", "")
