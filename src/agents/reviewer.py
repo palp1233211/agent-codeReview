@@ -18,12 +18,23 @@ DEFAULT_ORG_ID = os.getenv("YUNXIAO_ORG_ID", "5ea86562f89c9700014a671f")
 
 def _get_yunxiao_mcp_config() -> dict[str, Any]:
     """获取 OpenAI runtime 通过 HTTP 连接的云效 MCP 配置。"""
+    transport = os.getenv("YUNXIAO_MCP_TRANSPORT", "http").strip().lower().replace("-", "_")
+    if transport == "stdio":
+        raise ValueError(
+            "OpenAI runtime 不支持 stdio MCP；请配置 YUNXIAO_MCP_TRANSPORT=http/sse "
+            "和 YUNXIAO_MCP_URL，或改用 AGENT_PROVIDER=claude。"
+        )
+    if transport not in {"http", "streamable_http", "sse"}:
+        raise ValueError(f"不支持的 YUNXIAO_MCP_TRANSPORT: {transport}")
     headers = {}
     token = os.getenv("YUNXIAO_ACCESS_TOKEN") or os.getenv("YUNXIAO_TOKEN")
     toolsets = os.getenv("YUNXIAO_TOOLSETS", "code-management")
     server_url = os.getenv("YUNXIAO_MCP_URL")
     if not server_url:
-        return {}
+        raise ValueError(
+            "OpenAI 云效 MR 审查缺少 YUNXIAO_MCP_URL；"
+            "请配置 Streamable HTTP/SSE MCP 地址。"
+        )
     if token:
         headers["Authorization"] = f"Bearer {token}"
     headers["X-Devops-Toolsets"] = toolsets
@@ -31,6 +42,7 @@ def _get_yunxiao_mcp_config() -> dict[str, Any]:
         "type": "mcp",
         "server_label": "yunxiao",
         "server_url": server_url,
+        "transport": "sse" if transport == "sse" else "http",
         "require_approval": "never",
     }
     if headers:
@@ -242,7 +254,7 @@ class CodeReviewAgent:
 完成后请用中文输出审查摘要。"""
 
         provider = (os.getenv("AGENT_PROVIDER") or os.getenv("AGENT_SDK") or "claude").lower()
-        mcp_config = _get_yunxiao_mcp_config()
+        mcp_config = _get_yunxiao_mcp_config() if provider in {"openai", "openai_sdk"} else {}
         options = RuntimeOptions(
             allowed_tools=list(YUNXIAO_MR_AGENT.tools),
             allowed_agents=self._dimension_agent_names(dimensions)

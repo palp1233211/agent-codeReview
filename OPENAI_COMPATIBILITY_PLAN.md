@@ -22,7 +22,7 @@
 - [x] MCP Streamable HTTP：覆盖 initialize、tools/list、tools/call、鉴权头、流式多事件、严格响应 ID 和 HTTP/JSON-RPC 错误。
 - [x] MCP SSE：覆盖 endpoint 建连、notification/progress、目标响应匹配、超时、真实请求后 EOF、close 和 reconnect。
 - [x] 明确 stdio 支持边界：OpenAI runtime 仅支持 Streamable HTTP/legacy SSE；Claude stdio 继续由 Claude Agent SDK 管理。
-- [ ] 对 OpenAI stdio 配置给出明确的不支持错误，不恢复已删除的简化 stdio client。
+- [x] 对 OpenAI stdio 配置给出明确的不支持错误，不恢复已删除的简化 stdio client。
 - [x] MCP 生命周期：验证 HTTP session、HTTP 流响应、SSE 连接/线程及 runtime 持有的 clients 均被关闭。
 - [x] 修复 `.gitignore`，确保新增测试可被 Git 发现并在后续提交中进入 CI。
 - [ ] 错误结果闭环：`max_turns`、MCP 失败和模型输出不完整时，CLI 不打印成功并返回非零退出码。
@@ -73,3 +73,4 @@
 | 2026-08-28 | MCP 协议测试第二批 | HTTP SSE 增量解析/响应 ID/多行 data，legacy SSE notification/超时/线程停止；定向测试 17 passed，正常 EOF/重连待补 |
 | 2026-08-28 | Runtime MCP 生命周期 | Responses/Chat success/max_turns/模型异常及 tools/list 异常均关闭 clients；关闭失败不会伪报成功或覆盖主异常；定向测试累计 26 passed |
 | 2026-08-28 | MCP HTTP/SSE 协议收口 | 鉴权头、401/403/500、严格 ID、EOF/close/reconnect；定向测试累计 33 passed |
+| 2026-08-28 | OpenAI stdio 配置边界 | reviewer 和 MCP factory 均明确拒绝 stdio/未知 transport；Claude stdio 不受影响 |

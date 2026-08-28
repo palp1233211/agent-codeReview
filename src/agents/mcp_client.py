@@ -374,9 +374,22 @@ def create_http_mcp_clients(
     clients = []
     for config in configs:
         server_url = config.get("server_url") or config.get("url")
+        if config.get("command") and not server_url:
+            raise McpClientError(
+                "OpenAI runtime 不支持 command-only stdio MCP；请使用 http/sse transport 和 URL。"
+            )
+        transport = str(config.get("transport") or "http").strip().lower().replace("-", "_")
+        if transport == "stdio":
+            raise McpClientError(
+                "OpenAI runtime 不支持 stdio MCP；请使用 http/sse transport。"
+            )
+        if transport not in {"http", "streamable_http", "sse"}:
+            raise McpClientError(f"OpenAI runtime 不支持 MCP transport: {transport}")
         if not server_url:
-            continue
-        if config.get("transport") == "sse" or str(server_url).rstrip("/").endswith("/sse"):
+            raise McpClientError(
+                f"OpenAI MCP transport={transport} 缺少 server_url/url。"
+            )
+        if transport == "sse" or str(server_url).rstrip("/").endswith("/sse"):
             clients.append(
                 SseMcpClient(
                     server_label=str(config.get("server_label") or config.get("name") or "mcp"),
