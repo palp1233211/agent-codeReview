@@ -389,7 +389,7 @@ def create_http_mcp_clients(
             raise McpClientError(
                 f"OpenAI MCP transport={transport} 缺少 server_url/url。"
             )
-        if transport == "sse" or str(server_url).rstrip("/").endswith("/sse"):
+        if transport == "sse":
             clients.append(
                 SseMcpClient(
                     server_label=str(config.get("server_label") or config.get("name") or "mcp"),

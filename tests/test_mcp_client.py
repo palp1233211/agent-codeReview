@@ -230,14 +230,14 @@ def test_http_mcp_client_close_releases_session():
     session.close.assert_called_once_with()
 
 
-def test_mcp_client_factory_selects_legacy_sse_transport():
+def test_mcp_client_factory_keeps_http_default_for_sse_suffix_url():
     clients = create_http_mcp_clients(
         [{"server_label": "yunxiao", "server_url": "http://192.168.7.71:3000/sse"}]
     )
 
     try:
         assert len(clients) == 1
-        assert isinstance(clients[0], SseMcpClient)
+        assert isinstance(clients[0], HttpMcpClient)
     finally:
         for client in clients:
             client.close()
