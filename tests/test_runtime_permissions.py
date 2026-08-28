@@ -119,6 +119,46 @@ async def test_openai_modes_hide_disallowed_tools_from_schema(api_mode: str):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["responses", "chat"])
+async def test_openai_modes_apply_user_prompt_submit_context(api_mode: str):
+    prompt_hook = AsyncMock(
+        return_value={
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": "extra review context",
+            }
+        }
+    )
+    runtime = OpenAIAgentRuntime(model="test")
+    runtime.api_mode = api_mode
+    if api_mode == "responses":
+        create = Mock(return_value=SimpleNamespace(output=[], output_text=""))
+        runtime._client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    else:
+        message = SimpleNamespace(content=None, tool_calls=[])
+        create = Mock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=message)]))
+        runtime._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    await runtime.run(
+        "base prompt",
+        RuntimeOptions(hooks={"UserPromptSubmit": [{"hooks": [prompt_hook]}]}, max_turns=1),
+    )
+
+    if api_mode == "responses":
+        user_message = create.call_args.kwargs["input"][0]
+        assert user_message == {
+            "role": "user",
+            "content": "base prompt\n\nextra review context",
+        }
+    else:
+        assert create.call_args.kwargs["messages"][0] == {
+            "role": "user",
+            "content": "base prompt\n\nextra review context",
+        }
+    prompt_hook.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_execution_guard_rejects_hallucinated_disallowed_tool():
     _POLICY_CALLS.clear()
     runtime = OpenAIAgentRuntime(model="test")
@@ -132,6 +172,36 @@ async def test_execution_guard_rejects_hallucinated_disallowed_tool():
     )
 
     assert result == {"error": "工具未获准执行: PolicyProbe"}
+    assert _POLICY_CALLS == []
+
+
+@pytest.mark.asyncio
+async def test_permission_request_deny_short_circuits_before_pre_hook_and_execution():
+    _POLICY_CALLS.clear()
+    permission = AsyncMock(
+        return_value={
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "deny", "message": "permission denied"},
+            }
+        }
+    )
+    pre = AsyncMock()
+    runtime = OpenAIAgentRuntime(model="test")
+
+    result = await runtime._call_tool(  # noqa: SLF001
+        "PolicyProbe",
+        {},
+        cwd=".",
+        hooks={
+            "PermissionRequest": [{"matcher": "Policy*", "hooks": [permission]}],
+            "PreToolUse": [{"matcher": "PolicyProbe", "hooks": [pre]}],
+        },
+        allowed_tools=["PolicyProbe"],
+    )
+
+    assert result == {"error": "permission denied"}
+    pre.assert_not_called()
     assert _POLICY_CALLS == []
 
 
@@ -176,6 +246,34 @@ async def test_subagent_inherits_parent_disallowed_tools():
 
     nested_options = runtime.run.await_args.args[1]  # type: ignore[attr-defined]
     assert nested_options.disallowed_tools == ["PolicyProbe"]
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_runs_post_hook_with_subagent_result():
+    post = AsyncMock()
+    runtime = OpenAIAgentRuntime(model="test")
+    runtime.run = AsyncMock(  # type: ignore[method-assign]
+        return_value=[
+            {"type": "assistant", "content": ["agent summary"]},
+            {"type": "result", "subtype": "success"},
+        ]
+    )
+    spec = AgentSpec(description="Quality", prompt="Review", tools=("Read",))
+
+    result = await runtime._call_tool(  # noqa: SLF001
+        "Agent",
+        {"subagent_type": "quality", "prompt": "review"},
+        cwd=".",
+        hooks={"PostToolUse": [{"matcher": "Agent", "hooks": [post]}]},
+        agents={"quality": spec},
+        allowed_tools=["Agent"],
+    )
+
+    assert result["summary"] == "agent summary"
+    post.assert_awaited_once()
+    hook_input = post.await_args.args[0]
+    assert hook_input["tool_name"] == "Agent"
+    assert hook_input["tool_result"]["summary"] == "agent summary"
 
 
 @pytest.mark.asyncio

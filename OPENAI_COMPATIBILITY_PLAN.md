@@ -38,7 +38,7 @@
 ## Phase 2：Hooks、权限与文件边界
 
 - [x] 支持 hook matcher 通配符，例如 `mcp__yunxiao__*`。
-- [ ] 对齐 OpenAI runtime 的 PreToolUse、PostToolUse、UserPromptSubmit 和 PermissionRequest 行为。
+- [x] 对齐 OpenAI runtime 的 PreToolUse、PostToolUse、UserPromptSubmit 和 PermissionRequest 行为。
 - [x] 正确执行 `allowed_tools` 与 `disallowed_tools`，并在 schema 和执行层双重限制。
 - [x] `Read`、`Grep`、`Glob` 限制在配置的 `cwd` 内。
 - [x] 覆盖绝对路径、`../` 和符号链接越界测试。
@@ -79,3 +79,4 @@
 | 2026-08-28 | 完整测试收集恢复 | 迁移 clean_claude_env 测试、删除旧 src.models schema 测试并重写 reviewer runtime 测试；全量 283 passed |
 | 2026-08-28 | Hook matcher 与工具权限 | fnmatch 通配符；disallowed 优先；OpenAI/Claude schema 和执行层限制；子 Agent 继承禁止项 |
 | 2026-08-28 | 本地文件工具 cwd 边界 | Read/Grep/Glob 拒绝绝对路径和 ../ 越界；Read/Grep 拒绝符号链接越界；Glob 过滤符号链接越界结果；定向测试 23 passed |
+| 2026-08-28 | OpenAI Hook 行为对齐 | UserPromptSubmit 注入 prompt；PermissionRequest 可短路工具执行；Agent 工具触发 PostToolUse；全量 310 passed |

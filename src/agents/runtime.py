@@ -336,6 +336,7 @@ class OpenAIAgentRuntime:
         options: RuntimeOptions,
         mcp_clients: list[HttpMcpClient | SseMcpClient],
     ) -> list[dict[str, Any]]:
+        prompt = await _run_user_prompt_hooks(prompt, options.hooks)
         cwd = options.cwd or os.getcwd()
         allowed = set(options.allowed_tools)
         tools = [
@@ -500,6 +501,7 @@ class OpenAIAgentRuntime:
         options: RuntimeOptions,
         mcp_clients: list[HttpMcpClient | SseMcpClient],
     ) -> list[dict[str, Any]]:
+        prompt = await _run_user_prompt_hooks(prompt, options.hooks)
         cwd = options.cwd or os.getcwd()
         allowed = set(options.allowed_tools)
         tools = [
@@ -639,10 +641,26 @@ class OpenAIAgentRuntime:
     ) -> Any:
         if not _tool_is_allowed(name, allowed_tools or [], disallowed_tools or []):
             return {"error": f"工具未获准执行: {name}"}
+        mcp_entry = (mcp_tools or {}).get(name)
+        definition = get_registered_tool(name)
+        if name != "Agent" and not mcp_entry and definition is None:
+            _progress_from_values(progress_prefix, verbose, f"未知工具: {name}")
+            return {"error": f"未知工具: {name}"}
+
+        denied = await _run_permission_hooks(name, args, hooks or {})
+        if denied:
+            return denied
+
+        denied = await _run_pre_hooks(name, args, hooks or {})
+        if denied:
+            return denied
+
+        error: Exception | None = None
+        result: Any = {}
         if name == "Agent":
             _progress_from_values(progress_prefix, verbose, f"调用子 Agent: {_summarize_tool_args(args)}")
             try:
-                return await self._call_subagent(
+                result = await self._call_subagent(
                     args,
                     cwd=cwd,
                     hooks=hooks or {},
@@ -650,17 +668,16 @@ class OpenAIAgentRuntime:
                     max_turns=max_turns,
                     disallowed_tools=disallowed_tools or [],
                 )
+                return result
             except Exception as exc:
+                error = exc
                 _progress_from_values(progress_prefix, verbose, f"子 Agent 失败: error={exc}")
                 return {"error": f"子 Agent 执行失败: {exc}"}
+            finally:
+                await _run_post_hooks(name, result, error, hooks or {})
 
-        mcp_entry = (mcp_tools or {}).get(name)
         if mcp_entry:
             _, client, tool = mcp_entry
-            denied = await _run_pre_hooks(name, args, hooks or {})
-            if denied:
-                return denied
-            error: Exception | None = None
             try:
                 result = await asyncio.to_thread(client.call_tool, tool.server_name, args)
                 _progress_from_values(
@@ -674,21 +691,11 @@ class OpenAIAgentRuntime:
                 _progress_from_values(progress_prefix, verbose, f"MCP 工具失败: {name} error={exc}")
                 return {"error": str(exc)}
             finally:
-                await _run_post_hooks(name, locals().get("result", {}), error, hooks or {})
-
-        definition = get_registered_tool(name)
-        if definition is None:
-            _progress_from_values(progress_prefix, verbose, f"未知工具: {name}")
-            return {"error": f"未知工具: {name}"}
-
-        denied = await _run_pre_hooks(name, args, hooks or {})
-        if denied:
-            return denied
+                await _run_post_hooks(name, result, error, hooks or {})
 
         if "cwd" in inspect.signature(definition.func).parameters:
             args = {**args, "cwd": cwd}
 
-        error: Exception | None = None
         try:
             result = definition.func(**args)
             if inspect.isawaitable(result):
@@ -700,7 +707,7 @@ class OpenAIAgentRuntime:
             _progress_from_values(progress_prefix, verbose, f"工具失败: {name} error={exc}")
             return {"error": str(exc)}
         finally:
-            await _run_post_hooks(name, locals().get("result", {}), error, hooks or {})
+            await _run_post_hooks(name, result, error, hooks or {})
 
     async def _load_mcp_tools(
         self,
@@ -870,6 +877,40 @@ def _response_text(response: Any) -> str:
         return text
     chunks = [_message_text(item) for item in getattr(response, "output", []) or []]
     return "\n".join(chunk for chunk in chunks if chunk)
+
+
+async def _run_user_prompt_hooks(
+    prompt: str,
+    hooks: dict[str, list[dict[str, Any]]],
+) -> str:
+    effective_prompt = prompt
+    for hook in _matching_hooks("UserPromptSubmit", "", hooks):
+        result = await hook({"prompt": effective_prompt}, None, None)
+        output = result.get("hookSpecificOutput", {}) if isinstance(result, dict) else {}
+        additional_context = output.get("additionalContext")
+        if additional_context:
+            effective_prompt = f"{effective_prompt}\n\n{additional_context}"
+    return effective_prompt
+
+
+async def _run_permission_hooks(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    hooks: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    for hook in _matching_hooks("PermissionRequest", tool_name, hooks):
+        result = await hook({"tool_name": tool_name, "tool_input": tool_input}, None, None)
+        output = result.get("hookSpecificOutput", {}) if isinstance(result, dict) else {}
+        decision = output.get("decision")
+        behavior = decision.get("behavior") if isinstance(decision, dict) else decision
+        if behavior == "deny" or output.get("permissionDecision") == "deny":
+            reason = (
+                output.get("permissionDecisionReason")
+                or (decision.get("message") if isinstance(decision, dict) else None)
+                or "工具调用被拒绝"
+            )
+            return {"error": str(reason)}
+    return None
 
 
 async def _run_pre_hooks(
