@@ -184,10 +184,16 @@ def _tool_error_message(result: Any) -> str | None:
 
 
 def _safe_path(path: str, cwd: Path) -> Path:
+    root = cwd.resolve()
     candidate = Path(path)
     if not candidate.is_absolute():
-        candidate = cwd / candidate
-    return candidate.resolve()
+        candidate = root / candidate
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"路径越界: {path}") from exc
+    return resolved
 
 
 @agent_tool(
@@ -206,7 +212,10 @@ async def read_file_tool(
     cwd: str | None = None,
 ) -> dict[str, Any]:
     root = Path(cwd or os.getcwd()).resolve()
-    path = _safe_path(file_path, root)
+    try:
+        path = _safe_path(file_path, root)
+    except ValueError as exc:
+        return {"error": str(exc)}
     if not path.exists() or not path.is_file():
         return {"content": [{"type": "text", "text": f"文件不存在: {file_path}"}]}
 
@@ -233,7 +242,19 @@ async def read_file_tool(
 )
 async def glob_tool(pattern: str, cwd: str | None = None) -> dict[str, Any]:
     root = Path(cwd or os.getcwd()).resolve()
-    matches = sorted(str(path.relative_to(root)) for path in root.glob(pattern) if path.is_file())
+    pattern_path = Path(pattern)
+    if pattern_path.is_absolute() or ".." in pattern_path.parts:
+        return {"error": f"路径越界: {pattern}"}
+
+    matches: list[str] = []
+    for path in root.glob(pattern):
+        try:
+            resolved = _safe_path(str(path), root)
+        except ValueError:
+            continue
+        if resolved.is_file():
+            matches.append(str(path.relative_to(root)))
+    matches.sort()
     return {"content": [{"type": "text", "text": "\n".join(matches[:500])}], "matches": matches}
 
 
@@ -249,7 +270,10 @@ async def grep_tool(pattern: str, path: str = ".", cwd: str | None = None) -> di
     import subprocess
 
     root = Path(cwd or os.getcwd()).resolve()
-    target = _safe_path(path, root)
+    try:
+        target = _safe_path(path, root)
+    except ValueError as exc:
+        return {"error": str(exc)}
     result = subprocess.run(
         ["rg", "--line-number", "--color", "never", pattern, str(target)],
         cwd=root,

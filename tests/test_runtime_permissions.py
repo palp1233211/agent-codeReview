@@ -12,9 +12,12 @@ from src.agents.runtime import (
     ClaudeAgentRuntime,
     OpenAIAgentRuntime,
     RuntimeOptions,
+    glob_tool,
+    grep_tool,
     _matching_hooks,
     _tool_is_allowed,
     agent_tool,
+    read_file_tool,
 )
 
 
@@ -258,3 +261,104 @@ async def test_claude_local_tools_permission_normalizes_mcp_tool_names(monkeypat
         None,
     )
     assert type(deny_result).__name__ == "PermissionResultDeny"
+
+
+@pytest.mark.asyncio
+async def test_read_rejects_absolute_path_outside_cwd(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+
+    result = await read_file_tool(str(outside), cwd=str(root))
+
+    assert result == {"error": f"路径越界: {outside}"}
+
+
+@pytest.mark.asyncio
+async def test_read_rejects_parent_traversal_outside_cwd(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+
+    result = await read_file_tool("../secret.txt", cwd=str(root))
+
+    assert result == {"error": "路径越界: ../secret.txt"}
+
+
+@pytest.mark.asyncio
+async def test_read_rejects_symlink_target_outside_cwd(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    (root / "linked-secret.txt").symlink_to(outside)
+
+    result = await read_file_tool("linked-secret.txt", cwd=str(root))
+
+    assert result == {"error": "路径越界: linked-secret.txt"}
+
+
+@pytest.mark.asyncio
+async def test_grep_rejects_absolute_path_outside_cwd(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("needle", encoding="utf-8")
+
+    result = await grep_tool("needle", str(outside), cwd=str(root))
+
+    assert result == {"error": f"路径越界: {outside}"}
+
+
+@pytest.mark.asyncio
+async def test_grep_rejects_parent_traversal_outside_cwd(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("needle", encoding="utf-8")
+
+    result = await grep_tool("needle", "../secret.txt", cwd=str(root))
+
+    assert result == {"error": "路径越界: ../secret.txt"}
+
+
+@pytest.mark.asyncio
+async def test_grep_rejects_symlink_target_outside_cwd(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("needle", encoding="utf-8")
+    (root / "linked-secret.txt").symlink_to(outside)
+
+    result = await grep_tool("needle", "linked-secret.txt", cwd=str(root))
+
+    assert result == {"error": "路径越界: linked-secret.txt"}
+
+
+@pytest.mark.asyncio
+async def test_glob_rejects_absolute_and_parent_traversal_patterns(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    absolute_result = await glob_tool(str(tmp_path / "*.txt"), cwd=str(root))
+    traversal_result = await glob_tool("../*.txt", cwd=str(root))
+
+    assert absolute_result == {"error": f"路径越界: {tmp_path / '*.txt'}"}
+    assert traversal_result == {"error": "路径越界: ../*.txt"}
+
+
+@pytest.mark.asyncio
+async def test_glob_filters_symlink_targets_outside_cwd(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "visible.txt").write_text("visible", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    (root / "linked-outside").symlink_to(outside)
+
+    result = await glob_tool("**/*.txt", cwd=str(root))
+
+    assert result["matches"] == ["visible.txt"]
