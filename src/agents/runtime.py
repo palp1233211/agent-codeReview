@@ -237,6 +237,25 @@ class OpenAIAgentRuntime:
         return await self._run_responses(prompt, options)
 
     async def _run_responses(self, prompt: str, options: RuntimeOptions) -> list[dict[str, Any]]:
+        mcp_clients: list[HttpMcpClient | SseMcpClient] = []
+        primary_error: BaseException | None = None
+        try:
+            return await self._run_responses_inner(prompt, options, mcp_clients)
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            await self._close_mcp_clients(
+                mcp_clients,
+                suppress_errors=primary_error is not None,
+            )
+
+    async def _run_responses_inner(
+        self,
+        prompt: str,
+        options: RuntimeOptions,
+        mcp_clients: list[HttpMcpClient | SseMcpClient],
+    ) -> list[dict[str, Any]]:
         cwd = options.cwd or os.getcwd()
         allowed = set(options.allowed_tools)
         tools = [
@@ -246,7 +265,7 @@ class OpenAIAgentRuntime:
         ]
         if options.agents and (not allowed or "Agent" in allowed):
             tools.append(_openai_agent_tool_schema(options.allowed_agents or sorted(options.agents)))
-        mcp_tools = await self._load_mcp_tools(options, allowed)
+        mcp_tools = await self._load_mcp_tools(options, allowed, client_sink=mcp_clients)
         tools.extend(tool_schema for tool_schema, _, _ in mcp_tools.values())
         _progress(
             options,
@@ -347,6 +366,25 @@ class OpenAIAgentRuntime:
         return messages
 
     async def _run_chat_completions(self, prompt: str, options: RuntimeOptions) -> list[dict[str, Any]]:
+        mcp_clients: list[HttpMcpClient | SseMcpClient] = []
+        primary_error: BaseException | None = None
+        try:
+            return await self._run_chat_completions_inner(prompt, options, mcp_clients)
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            await self._close_mcp_clients(
+                mcp_clients,
+                suppress_errors=primary_error is not None,
+            )
+
+    async def _run_chat_completions_inner(
+        self,
+        prompt: str,
+        options: RuntimeOptions,
+        mcp_clients: list[HttpMcpClient | SseMcpClient],
+    ) -> list[dict[str, Any]]:
         cwd = options.cwd or os.getcwd()
         allowed = set(options.allowed_tools)
         tools = [
@@ -367,7 +405,12 @@ class OpenAIAgentRuntime:
         ]
         if options.agents and (not allowed or "Agent" in allowed):
             tools.append({"type": "function", "function": _openai_agent_function_schema(options.allowed_agents or sorted(options.agents))})
-        mcp_tools = await self._load_mcp_tools(options, allowed, chat_completions=True)
+        mcp_tools = await self._load_mcp_tools(
+            options,
+            allowed,
+            chat_completions=True,
+            client_sink=mcp_clients,
+        )
         tools.extend(tool_schema for tool_schema, _, _ in mcp_tools.values())
         _progress(
             options,
@@ -505,6 +548,7 @@ class OpenAIAgentRuntime:
         allowed: set[str],
         *,
         chat_completions: bool = False,
+        client_sink: list[HttpMcpClient | SseMcpClient] | None = None,
     ) -> dict[
         str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient, McpTool]
     ]:
@@ -512,6 +556,8 @@ class OpenAIAgentRuntime:
             str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient, McpTool]
         ] = {}
         for client in create_http_mcp_clients(options.remote_mcp_servers):
+            if client_sink is not None:
+                client_sink.append(client)
             tools = await asyncio.to_thread(client.list_tools)
             selected = [tool for tool in tools if not allowed or tool.exposed_name in allowed]
             _progress(
@@ -531,6 +577,26 @@ class OpenAIAgentRuntime:
                 )
                 imported[tool.exposed_name] = (schema, client, tool)
         return imported
+
+    @staticmethod
+    async def _close_mcp_clients(
+        clients: list[HttpMcpClient | SseMcpClient],
+        *,
+        suppress_errors: bool,
+    ) -> None:
+        close_errors: list[Exception] = []
+        for client in reversed(clients):
+            try:
+                await asyncio.to_thread(client.close)
+            except Exception as exc:
+                close_errors.append(exc)
+                print(
+                    f"⚠️ MCP client 关闭失败: server={client.server_label} error={exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        if close_errors and not suppress_errors:
+            raise RuntimeError(f"MCP client 关闭失败: {close_errors[0]}") from close_errors[0]
 
     async def _call_subagent(
         self,

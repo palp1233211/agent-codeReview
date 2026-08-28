@@ -174,3 +174,184 @@ async def test_openai_modes_report_max_turns_as_error(api_mode: str):
         "is_error": True,
         "content": None,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["responses", "chat"])
+async def test_openai_modes_close_mcp_clients_after_success(monkeypatch, api_mode: str):
+    mcp_client = Mock()
+    mcp_client.server_label = "test-mcp"
+    mcp_client.list_tools.return_value = []
+    monkeypatch.setattr(
+        "src.agents.runtime.create_http_mcp_clients",
+        lambda _configs: [mcp_client],
+    )
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.api_mode = api_mode
+    if api_mode == "responses":
+        runtime._client = SimpleNamespace(
+            responses=SimpleNamespace(
+                create=Mock(return_value=SimpleNamespace(output=[_message("done")], output_text="done"))
+            )
+        )
+    else:
+        runtime._client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=Mock(
+                        return_value=SimpleNamespace(
+                            choices=[SimpleNamespace(message=_ChatMessage(content="done", tool_calls=[]))]
+                        )
+                    )
+                )
+            )
+        )
+
+    await runtime.run(
+        "review",
+        RuntimeOptions(remote_mcp_servers=[{"server_url": "https://example.test/mcp"}]),
+    )
+
+    mcp_client.close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_openai_runtime_closes_mcp_client_when_tool_loading_fails(monkeypatch):
+    mcp_client = Mock()
+    mcp_client.server_label = "broken-mcp"
+    mcp_client.list_tools.side_effect = RuntimeError("tools/list failed")
+    monkeypatch.setattr(
+        "src.agents.runtime.create_http_mcp_clients",
+        lambda _configs: [mcp_client],
+    )
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.api_mode = "responses"
+
+    with pytest.raises(RuntimeError, match="tools/list failed"):
+        await runtime.run(
+            "review",
+            RuntimeOptions(remote_mcp_servers=[{"server_url": "https://example.test/mcp"}]),
+        )
+
+    mcp_client.close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["responses", "chat"])
+async def test_openai_modes_close_mcp_clients_after_max_turns(monkeypatch, api_mode: str):
+    mcp_client = Mock()
+    mcp_client.server_label = "test-mcp"
+    mcp_client.list_tools.return_value = []
+    monkeypatch.setattr(
+        "src.agents.runtime.create_http_mcp_clients",
+        lambda _configs: [mcp_client],
+    )
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.api_mode = api_mode
+    if api_mode == "responses":
+        runtime._client = SimpleNamespace(
+            responses=SimpleNamespace(
+                create=Mock(return_value=SimpleNamespace(output=[_function_call("call-a", "A")], output_text=""))
+            )
+        )
+    else:
+        runtime._client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=Mock(
+                        return_value=SimpleNamespace(
+                            choices=[SimpleNamespace(message=_ChatMessage(content=None, tool_calls=[_chat_tool_call("call-a", "A")]))]
+                        )
+                    )
+                )
+            )
+        )
+
+    messages = await runtime.run(
+        "review",
+        RuntimeOptions(
+            allowed_tools=["TestEcho"],
+            max_turns=1,
+            remote_mcp_servers=[{"server_url": "https://example.test/mcp"}],
+        ),
+    )
+
+    assert messages[-1]["subtype"] == "max_turns"
+    mcp_client.close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["responses", "chat"])
+async def test_openai_modes_close_mcp_clients_after_model_error(monkeypatch, api_mode: str):
+    mcp_client = Mock()
+    mcp_client.server_label = "test-mcp"
+    mcp_client.list_tools.return_value = []
+    monkeypatch.setattr(
+        "src.agents.runtime.create_http_mcp_clients",
+        lambda _configs: [mcp_client],
+    )
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.api_mode = api_mode
+    failing_create = Mock(side_effect=RuntimeError("model failed"))
+    if api_mode == "responses":
+        runtime._client = SimpleNamespace(responses=SimpleNamespace(create=failing_create))
+    else:
+        runtime._client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=failing_create))
+        )
+
+    with pytest.raises(RuntimeError, match="model failed"):
+        await runtime.run(
+            "review",
+            RuntimeOptions(remote_mcp_servers=[{"server_url": "https://example.test/mcp"}]),
+        )
+
+    mcp_client.close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_openai_runtime_reports_close_failure_after_success(monkeypatch):
+    mcp_client = Mock()
+    mcp_client.server_label = "broken-close"
+    mcp_client.list_tools.return_value = []
+    mcp_client.close.side_effect = RuntimeError("close failed")
+    monkeypatch.setattr(
+        "src.agents.runtime.create_http_mcp_clients",
+        lambda _configs: [mcp_client],
+    )
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.api_mode = "responses"
+    runtime._client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=Mock(return_value=SimpleNamespace(output=[_message("done")], output_text="done"))
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="MCP client 关闭失败: close failed"):
+        await runtime.run(
+            "review",
+            RuntimeOptions(remote_mcp_servers=[{"server_url": "https://example.test/mcp"}]),
+        )
+
+
+@pytest.mark.asyncio
+async def test_openai_runtime_preserves_primary_error_when_close_also_fails(monkeypatch):
+    mcp_client = Mock()
+    mcp_client.server_label = "double-failure"
+    mcp_client.list_tools.return_value = []
+    mcp_client.close.side_effect = RuntimeError("close failed")
+    monkeypatch.setattr(
+        "src.agents.runtime.create_http_mcp_clients",
+        lambda _configs: [mcp_client],
+    )
+    runtime = OpenAIAgentRuntime(model="test-model")
+    runtime.api_mode = "responses"
+    runtime._client = SimpleNamespace(
+        responses=SimpleNamespace(create=Mock(side_effect=ValueError("primary failed")))
+    )
+
+    with pytest.raises(ValueError, match="primary failed"):
+        await runtime.run(
+            "review",
+            RuntimeOptions(remote_mcp_servers=[{"server_url": "https://example.test/mcp"}]),
+        )
