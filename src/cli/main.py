@@ -20,18 +20,26 @@ except ImportError:
     sys.exit(1)
 
 
-def _check_env():
+def _check_env(command: str | None = None):
     provider = (os.getenv("AGENT_PROVIDER") or os.getenv("AGENT_SDK") or "claude").lower()
     print(f"🧭 Provider: {provider}")
     if provider in {"openai", "openai_sdk"}:
-        api_key = os.getenv("OPENAI_API_KEY")
-        base_url = os.getenv("OPENAI_BASE_URL", "")
-        model = os.getenv("OPENAI_MODEL", "gpt-5.4")
-        if not api_key:
-            print("❌ 错误: 未设置 OPENAI_API_KEY，请在 .env 文件中配置")
+        from src.agents.reviewer import validate_openai_runtime_config
+
+        try:
+            validate_openai_runtime_config(
+                provider,
+                require_yunxiao_mcp=command == "yunxiao-mr",
+            )
+        except ValueError as exc:
+            print(f"❌ 错误: {exc}")
             sys.exit(1)
+        base_url = os.getenv("OPENAI_BASE_URL", "")
+        model = os.getenv("OPENAI_MODEL", "")
         if base_url:
             print(f"🔗 API endpoint: {base_url}")
+        elif provider == "openai":
+            print("🔗 API endpoint: OpenAI 官方默认")
         print(f"🤖 Model: {model}")
         return
 
@@ -319,7 +327,7 @@ def main():
     if args.command == "kb-import":
         sys.exit(cmd_kb_import(dry_run=args.dry_run))
 
-    _check_env()
+    _check_env(args.command)
     print("=" * 50)
     print("🔍 Agent Code Review")
     print("=" * 50)

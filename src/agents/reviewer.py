@@ -14,6 +14,34 @@ from ..prompts import (
 
 # 默认组织 ID
 DEFAULT_ORG_ID = os.getenv("YUNXIAO_ORG_ID", "5ea86562f89c9700014a671f")
+OPENAI_PROVIDERS = {"openai", "openai_sdk"}
+
+
+def validate_openai_runtime_config(
+    provider: str,
+    *,
+    require_yunxiao_mcp: bool = False,
+) -> None:
+    """Fail fast on missing OpenAI-compatible runtime configuration."""
+    selected = provider.lower()
+    if selected not in OPENAI_PROVIDERS:
+        return
+
+    missing = []
+    if not os.getenv("OPENAI_API_KEY"):
+        missing.append("OPENAI_API_KEY")
+    if not os.getenv("OPENAI_MODEL"):
+        missing.append("OPENAI_MODEL")
+    if selected == "openai_sdk" and not os.getenv("OPENAI_BASE_URL"):
+        missing.append("OPENAI_BASE_URL")
+    if require_yunxiao_mcp:
+        if not os.getenv("YUNXIAO_MCP_URL"):
+            missing.append("YUNXIAO_MCP_URL")
+        if not (os.getenv("YUNXIAO_ACCESS_TOKEN") or os.getenv("YUNXIAO_TOKEN")):
+            missing.append("YUNXIAO_ACCESS_TOKEN")
+
+    if missing:
+        raise ValueError("OpenAI runtime 配置缺失: " + ", ".join(missing))
 
 
 def _get_yunxiao_mcp_config() -> dict[str, Any]:
@@ -34,6 +62,11 @@ def _get_yunxiao_mcp_config() -> dict[str, Any]:
         raise ValueError(
             "OpenAI 云效 MR 审查缺少 YUNXIAO_MCP_URL；"
             "请配置 Streamable HTTP/SSE MCP 地址。"
+        )
+    if not token:
+        raise ValueError(
+            "OpenAI 云效 MR 审查缺少 YUNXIAO_ACCESS_TOKEN；"
+            "请配置云效访问令牌。"
         )
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -254,7 +287,8 @@ class CodeReviewAgent:
 完成后请用中文输出审查摘要。"""
 
         provider = (os.getenv("AGENT_PROVIDER") or os.getenv("AGENT_SDK") or "claude").lower()
-        mcp_config = _get_yunxiao_mcp_config() if provider in {"openai", "openai_sdk"} else {}
+        validate_openai_runtime_config(provider, require_yunxiao_mcp=True)
+        mcp_config = _get_yunxiao_mcp_config() if provider in OPENAI_PROVIDERS else {}
         options = RuntimeOptions(
             allowed_tools=list(YUNXIAO_MR_AGENT.tools),
             allowed_agents=self._dimension_agent_names(dimensions)

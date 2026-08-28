@@ -45,7 +45,7 @@
 
 ## Phase 3：真实只读兼容验证
 
-- [ ] 启动前检查 OpenAI API、模型、Base URL 和云效 MCP 配置，缺失时 fail-fast。
+- [x] 启动前检查 OpenAI API、模型、Base URL 和云效 MCP 配置，缺失时 fail-fast。
 - [ ] 验证 OpenAI-compatible endpoint 基础请求。
 - [ ] 验证云效 MCP initialize 和 tools/list。
 - [ ] 使用真实 MR 执行 `--no-comment` 审查。
@@ -80,3 +80,4 @@
 | 2026-08-28 | Hook matcher 与工具权限 | fnmatch 通配符；disallowed 优先；OpenAI/Claude schema 和执行层限制；子 Agent 继承禁止项 |
 | 2026-08-28 | 本地文件工具 cwd 边界 | Read/Grep/Glob 拒绝绝对路径和 ../ 越界；Read/Grep 拒绝符号链接越界；Glob 过滤符号链接越界结果；定向测试 23 passed |
 | 2026-08-28 | OpenAI Hook 行为对齐 | UserPromptSubmit 注入 prompt；PermissionRequest 可短路工具执行；Agent 工具触发 PostToolUse；全量 310 passed |
+| 2026-08-28 | OpenAI 启动前配置检查 | OpenAI provider 缺 API key/model 失败；openai_sdk 缺 base URL 失败；云效 MR 缺 MCP URL/token 失败；CLI 仅 yunxiao-mr 要求云效 MCP；定向测试 29 passed，全量 316 passed |

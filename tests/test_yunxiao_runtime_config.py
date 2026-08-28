@@ -2,9 +2,81 @@
 from __future__ import annotations
 
 import pytest
+import importlib
 
 from src.agents import reviewer
 from src.agents.mcp_client import McpClientError, SseMcpClient, create_http_mcp_clients
+
+cli_main = importlib.import_module("src.cli.main")
+
+
+def test_validate_openai_runtime_config_ignores_claude_provider(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    reviewer.validate_openai_runtime_config("claude")
+
+
+def test_validate_openai_runtime_config_requires_openai_credentials(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    with pytest.raises(ValueError) as exc:
+        reviewer.validate_openai_runtime_config("openai")
+
+    message = str(exc.value)
+    assert "OPENAI_API_KEY" in message
+    assert "OPENAI_MODEL" in message
+    assert "OPENAI_BASE_URL" not in message
+
+
+def test_validate_openai_runtime_config_requires_compatible_base_url(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="OPENAI_BASE_URL"):
+        reviewer.validate_openai_runtime_config("openai_sdk")
+
+
+def test_validate_openai_runtime_config_requires_yunxiao_mcp_settings(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.delenv("YUNXIAO_MCP_URL", raising=False)
+    monkeypatch.delenv("YUNXIAO_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("YUNXIAO_TOKEN", raising=False)
+
+    with pytest.raises(ValueError) as exc:
+        reviewer.validate_openai_runtime_config("openai", require_yunxiao_mcp=True)
+
+    message = str(exc.value)
+    assert "YUNXIAO_MCP_URL" in message
+    assert "YUNXIAO_ACCESS_TOKEN" in message
+
+
+def test_cli_openai_local_review_does_not_require_yunxiao_mcp(monkeypatch):
+    monkeypatch.setenv("AGENT_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.delenv("YUNXIAO_MCP_URL", raising=False)
+    monkeypatch.delenv("YUNXIAO_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("YUNXIAO_TOKEN", raising=False)
+
+    cli_main._check_env("files")  # noqa: SLF001
+
+
+def test_cli_openai_yunxiao_requires_mcp_settings(monkeypatch):
+    monkeypatch.setenv("AGENT_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.delenv("YUNXIAO_MCP_URL", raising=False)
+    monkeypatch.delenv("YUNXIAO_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("YUNXIAO_TOKEN", raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        cli_main._check_env("yunxiao-mr")  # noqa: SLF001
+
+    assert exc.value.code == 1
 
 
 def test_openai_yunxiao_stdio_configuration_is_rejected(monkeypatch):

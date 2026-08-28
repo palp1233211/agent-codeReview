@@ -76,7 +76,7 @@ def test_main_propagates_review_exit_code(monkeypatch):
         return 1
 
     monkeypatch.setattr(cli_main, "cmd_yunxiao_mr", fake_command)
-    monkeypatch.setattr(cli_main, "_check_env", lambda: None)
+    monkeypatch.setattr(cli_main, "_check_env", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -121,7 +121,7 @@ def test_main_propagates_local_review_exit_codes(monkeypatch, command_name: str,
         return 1
 
     monkeypatch.setattr(cli_main, command_name, fake_command)
-    monkeypatch.setattr(cli_main, "_check_env", lambda: None)
+    monkeypatch.setattr(cli_main, "_check_env", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sys, "argv", argv)
 
     with pytest.raises(SystemExit) as exc:
