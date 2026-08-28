@@ -1,6 +1,6 @@
 # Code Review Agent Service
 
-支持 Claude Agent SDK 与 OpenAI SDK 双运行时的智能代码审查服务，集成云效平台 MCP 工具。
+支持 Claude Agent SDK 与 OpenAI SDK 双运行时的智能代码审查服务，云效 MR 审查走同一套本地工具链，可在两种 SDK 间切换而不影响功能。
 
 ## 功能特性
 
@@ -65,7 +65,8 @@ pip install -r requirements.txt
 # OPENAI_MODEL=gpt-5.4
 # OPENAI_BASE_URL=https://api.openai.com/v1
 # OPENAI_API_MODE=responses  # responses 或 chat_completions
-# YUNXIAO_MCP_URL=https://your-yunxiao-mcp.example.com/mcp  # 云效 MR 审查需要远程 MCP
+# YUNXIAO_MCP_URL=https://openapi-rdc.aliyuncs.com/ai/mcp?toolsets=code-management
+# OpenAI 模式由 my-agent 直接连接 HTTP MCP，不要求模型供应商原生支持 type=mcp
 
 # 启动服务
 python run.py
@@ -240,7 +241,10 @@ OPENAI_API_KEY=your_api_key_here
 OPENAI_MODEL=gpt-5.4
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_MODE=responses
-YUNXIAO_MCP_URL=https://your-yunxiao-mcp.example.com/mcp
+YUNXIAO_ACCESS_TOKEN=your_yunxiao_token_here
+YUNXIAO_ORG_ID=5ea86562f89c9700014a671f
+YUNXIAO_MCP_URL=https://openapi-rdc.aliyuncs.com/ai/mcp?toolsets=code-management
+YUNXIAO_TOOLSETS=code-management
 SERVICE_PORT=8000
 MAX_FILE_SIZE_KB=500
 ```

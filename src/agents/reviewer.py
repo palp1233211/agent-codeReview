@@ -17,15 +17,31 @@ DEFAULT_ORG_ID = os.getenv("YUNXIAO_ORG_ID", "5ea86562f89c9700014a671f")
 
 
 def _get_yunxiao_mcp_config() -> dict[str, Any]:
-    """获取 OpenAI Responses API 的远程云效 MCP 配置。"""
+    """获取 OpenAI runtime 直接连接的云效 MCP 配置。"""
+    transport = os.getenv("YUNXIAO_MCP_TRANSPORT", "http").lower()
+    headers = {}
+    token = os.getenv("YUNXIAO_ACCESS_TOKEN") or os.getenv("YUNXIAO_TOKEN")
+    toolsets = os.getenv("YUNXIAO_TOOLSETS", "code-management")
+    if transport == "stdio":
+        return {
+            "transport": "stdio",
+            "server_label": "yunxiao",
+            "command": os.getenv("YUNXIAO_MCP_COMMAND", "npx"),
+            "args": os.getenv(
+                "YUNXIAO_MCP_ARGS",
+                "-y alibabacloud-devops-mcp-server",
+            ).split(),
+            "env": {
+                "YUNXIAO_ACCESS_TOKEN": token or "",
+                "DEVOPS_TOOLSETS": toolsets,
+            },
+        }
     server_url = os.getenv("YUNXIAO_MCP_URL")
     if not server_url:
         return {}
-    headers = {}
-    token = os.getenv("YUNXIAO_ACCESS_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    headers["X-Devops-Toolsets"] = "code-management"
+    headers["X-Devops-Toolsets"] = toolsets
     config: dict[str, Any] = {
         "type": "mcp",
         "server_label": "yunxiao",
@@ -240,6 +256,7 @@ class CodeReviewAgent:
 
 完成后请用中文输出审查摘要。"""
 
+        provider = (os.getenv("AGENT_PROVIDER") or os.getenv("AGENT_SDK") or "claude").lower()
         mcp_config = _get_yunxiao_mcp_config()
         options = RuntimeOptions(
             allowed_tools=list(YUNXIAO_MR_AGENT.tools),
@@ -271,7 +288,7 @@ class CodeReviewAgent:
             "organization_id": organization_id,
             "auto_comment": auto_comment,
             "dimensions": dimensions or ["all"],
-            "provider": (os.getenv("AGENT_PROVIDER") or os.getenv("AGENT_SDK") or "claude").lower(),
+            "provider": provider,
         }
 
         return parsed

@@ -1,4 +1,4 @@
-"""云效 MCP 工具集成 - MR 代码审查"""
+"""云效工具集成 - 云效 MR 代码审查"""
 from typing import Any
 
 from ..agents.runtime import agent_tool as tool
@@ -27,9 +27,11 @@ async def get_yunxiao_mr(
     repository_id: str,
     local_id: str,
 ) -> dict:
-    """获取云效 MR 详情"""
-    # 这个工具会调用 yunxiao MCP server
-    # 在实际实现中，这里应该通过 MCP 协议调用
+    """获取云效 MR 详情。
+
+    现在的实现保留为结构化占位工具，供 Claude/OpenAI runtime 统一调度。
+    真正的云效 MCP 调用由 runtime 侧的远程 MCP/stdio server 承担。
+    """
     return {
         "content": [
             {
@@ -74,7 +76,7 @@ async def get_yunxiao_mr_diff(
     source_branch: str,
     target_branch: str,
 ) -> dict:
-    """获取云效 MR diff"""
+    """获取云效 MR diff。"""
     return {
         "content": [
             {
@@ -138,7 +140,7 @@ async def comment_on_yunxiao_mr(
     file_path: str | None = None,
     line_number: int | None = None,
 ) -> dict:
-    """在云效 MR 上添加评论"""
+    """在云效 MR 上添加评论。"""
     return {
         "content": [
             {
@@ -187,7 +189,7 @@ async def get_yunxiao_mr_files(
     ref: str,
     path: str | None = None,
 ) -> dict:
-    """获取云效仓库文件列表"""
+    """获取云效仓库文件列表。"""
     return {
         "content": [
             {
@@ -234,7 +236,7 @@ async def get_yunxiao_file_content(
     file_path: str,
     ref: str,
 ) -> dict:
-    """读取云效仓库文件"""
+    """读取云效仓库文件。"""
     return {
         "content": [
             {
@@ -269,7 +271,7 @@ class YunxiaoMRReviewHelper:
         repository_id: str,
         local_id: str,
     ) -> dict[str, Any]:
-        """获取 MR 信息"""
+        """获取 MR 信息。"""
         return await get_yunxiao_mr(
             organization_id=self.organization_id,
             repository_id=repository_id,
@@ -282,7 +284,7 @@ class YunxiaoMRReviewHelper:
         source_branch: str,
         target_branch: str,
     ) -> dict[str, Any]:
-        """获取 MR diff"""
+        """获取 MR diff。"""
         return await get_yunxiao_mr_diff(
             organization_id=self.organization_id,
             repository_id=repository_id,
@@ -299,7 +301,7 @@ class YunxiaoMRReviewHelper:
         file_path: str | None = None,
         line_number: int | None = None,
     ) -> dict[str, Any]:
-        """添加审查评论"""
+        """添加审查评论。"""
         return await comment_on_yunxiao_mr(
             organization_id=self.organization_id,
             repository_id=repository_id,
@@ -316,7 +318,7 @@ class YunxiaoMRReviewHelper:
         file_path: str,
         ref: str,
     ) -> dict[str, Any]:
-        """读取仓库文件"""
+        """读取仓库文件。"""
         return await get_yunxiao_file_content(
             organization_id=self.organization_id,
             repository_id=repository_id,

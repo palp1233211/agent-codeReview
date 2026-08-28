@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A CLI-only agent that reviews Yunxiao (云效) Merge Requests via either the Claude Agent SDK or the OpenAI SDK and posts a single Chinese-language Markdown comment back to the MR. Also includes a standalone Feishu bot (long-connection/WebSocket mode) under `src/lark/`.
+A CLI-only agent that reviews Yunxiao (云效) Merge Requests via either the Claude Agent SDK or the OpenAI SDK and posts a single Chinese-language Markdown comment back to the MR. Yunxiao review now uses the same local tool chain in both runtimes. Also includes a standalone Feishu bot (long-connection/WebSocket mode) under `src/lark/`.
 
 ## Build and Test Commands
 
@@ -34,9 +34,12 @@ Copy `.env.example` to `.env` and configure:
 - `OPENAI_BASE_URL`: Optional OpenAI-compatible endpoint.
 - `OPENAI_MODEL`: Model name for OpenAI mode, defaults to `gpt-5.4`.
 - `OPENAI_API_MODE`: `responses` by default; use `chat_completions` for providers that only implement Chat Completions.
-- `YUNXIAO_MCP_URL`: Remote MCP endpoint for Yunxiao MR review in OpenAI Responses mode. Claude mode keeps using the stdio `npx alibabacloud-devops-mcp-server` MCP config.
 - `YUNXIAO_ACCESS_TOKEN`: Yunxiao platform access token
 - `YUNXIAO_ORG_ID`: Default organization ID for Yunxiao MR operations
+- `YUNXIAO_MCP_URL`: HTTP MCP endpoint used directly by the OpenAI runtime.
+- `YUNXIAO_MCP_TRANSPORT`: `http` or `stdio`; stdio starts the local Yunxiao MCP process.
+- `YUNXIAO_MCP_COMMAND` / `YUNXIAO_MCP_ARGS`: local MCP command and space-separated arguments for stdio mode.
+- `YUNXIAO_TOOLSETS`: Yunxiao MCP toolsets header, defaults to `code-management`.
 - `LARK_APP_ID` / `LARK_APP_SECRET`: Feishu app credentials, used by `LarkClient` (bi-weekly-doc task) and the `lark-bot` WebSocket bot
 - `DIFY_BASE_URL` / `DIFY_API_KEY`: local Dify instance + app API key, used by `DifyClient` to forward `lark-bot` messages to a Dify Chatflow
 - `DB_HOST` / `DB_PORT` / `DB_USERNAME` / `DB_PASSWORD` / `DB_DATABASE` / `DB_CHARSET`: MySQL connection used by `ConversationStore` to log every `lark-bot` question/answer into `lark_bot_conversations`, and by `KnowledgeGapStore` for `lark_bot_knowledge_gaps`
@@ -49,7 +52,8 @@ Copy `.env.example` to `.env` and configure:
 ### Core Components
 
 - **`src/agents/reviewer.py`**: `CodeReviewAgent` — entry point for `review_yunxiao_mr()`, `review_files()`, and `review_git_diff()`. It builds prompts from YAML and selects the runtime via `AGENT_PROVIDER`.
-- **`src/agents/runtime.py`**: provider-neutral runtime layer. `ClaudeAgentRuntime` preserves Claude Agent SDK behavior, including the native `Agent` tool, hooks, and stdio MCP servers. `OpenAIAgentRuntime` uses OpenAI Responses or Chat Completions, registers local function tools, implements an `Agent` function tool for subagent dispatch, and executes pre/post hooks around local tool calls.
+- **`src/agents/runtime.py`**: provider-neutral runtime layer. `ClaudeAgentRuntime` preserves Claude Agent SDK behavior, including the native `Agent` tool, hooks, and stdio MCP servers. `OpenAIAgentRuntime` uses OpenAI Responses or Chat Completions and bridges HTTP MCP tools into ordinary function tools so compatible providers do not need native `type=mcp` support.
+- **`src/agents/mcp_client.py`**: Streamable HTTP MCP client used by the OpenAI runtime for `initialize`, `tools/list`, and `tools/call`.
 - **`src/prompts/yunxiao_mr.yaml`**: prompt + allowed tool list for the MR reviewer.
 - **`src/prompts/__init__.py`**: thin YAML loader exporting `YUNXIAO_MR_AGENT`.
 - **`src/hooks/validation.py`**: PreToolUse / PostToolUse / UserPromptSubmit hooks (path validation, audit log, prompt enrichment).
@@ -88,21 +92,16 @@ Run `python cli.py kb-doctor` before deploying — it verifies mounted paths, cr
 - **`doc_language` must be sent explicitly** (`"Chinese"`). Dify interpolates it into the summary prompt's `{language}` placeholder; the default is `English`, which yields English summaries for Chinese documents — and a Chinese query matches an English summary poorly.
 - **Summaries survive nothing.** `update-by-text` recreates all segments with new ids, so per-segment `summary` values are wiped. If the dataset's Summary Index is enabled they are regenerated asynchronously *after* `indexing-status` already reports `completed`; if it is disabled they are simply gone. `summary` is writable only via the segment-level API (`SegmentUpdateArgs`), never via `update-by-text`.
 - **Never push a block that has only a heading.** With no facts to work from, the summary model fabricates. Observed on a 20-char title-only chunk: it invented "cat=21 对应严重违规，cat=22 对应一般违规" — cat=21 is actually 客户投诉 and cat=22 does not exist. `render_for_dify` drops such blocks (`_has_body`).
-- Provider behavior differs: Claude mode keeps the original Claude Agent SDK mechanism. In OpenAI mode, use `OPENAI_API_MODE=responses` when the provider implements Responses API and MCP tools; use `OPENAI_API_MODE=chat_completions` for providers that only implement Chat Completions and local function tools.
+- Provider behavior differs: Claude mode keeps the original Claude Agent SDK stdio MCP mechanism. OpenAI mode connects HTTP MCP itself and presents ordinary function tools to the configured provider; use `OPENAI_API_MODE=chat_completions` only when the provider does not implement Responses API function calling.
 
 ### Yunxiao MR Review Flow
 
-The agent runs as a single-layer query (no sub-agent dispatch) so all yunxiao MCP tools are called directly through the configured remote MCP server. Tool sequence (via `mcp__yunxiao__*`):
+The agent uses the same provider-neutral local tool chain in both runtimes. Tool sequence:
 
-1. `get_change_request` → MR details
-2. `list_change_request_patch_sets` → find latest `MERGE_SOURCE` patch set
-3. `compare` → branch-to-branch diff
-4. `get_file_blobs` → full file content for changed files
-5. `create_change_request_comment` → publish review comment (GLOBAL_COMMENT, single call)
-
-### MCP Server Architecture
-
-- **External server**: `yunxiao` — stdio process via `npx alibabacloud-devops-mcp-server`, configured at runtime in `_get_yunxiao_mcp_config()` so `YUNXIAO_ACCESS_TOKEN` is read from the live environment.
+1. `get_yunxiao_mr` → MR details
+2. `get_yunxiao_mr_diff` → branch diff
+3. `get_yunxiao_mr_files` / `get_yunxiao_file_content` → full file content for changed files
+4. `comment_on_yunxiao_mr` → publish review comment (GLOBAL_COMMENT, single call)
 
 ## Important Patterns
 

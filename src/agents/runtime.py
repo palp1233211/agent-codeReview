@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .mcp_client import HttpMcpClient, McpTool, SseMcpClient, StdioMcpClient, create_mcp_clients
+
 ToolCallable = Callable[..., Any | Awaitable[Any]]
 
 
@@ -244,10 +246,11 @@ class OpenAIAgentRuntime:
         ]
         if options.agents and (not allowed or "Agent" in allowed):
             tools.append(_openai_agent_tool_schema(options.allowed_agents or sorted(options.agents)))
-        tools.extend(options.remote_mcp_servers)
+        mcp_tools = await self._load_mcp_tools(options, allowed)
+        tools.extend(tool_schema for tool_schema, _, _ in mcp_tools.values())
         _progress(
             options,
-            f"OpenAI Responses 启动，tools={len(tools)}，remote_mcp={len(options.remote_mcp_servers)}",
+            f"OpenAI Responses 启动，tools={len(tools)}，mcp_tools={len(mcp_tools)}",
         )
 
         system_parts = []
@@ -262,7 +265,6 @@ class OpenAIAgentRuntime:
             input_items.insert(0, {"role": "system", "content": system_prompt})
 
         messages: list[dict[str, Any]] = []
-        previous_response_id: str | None = None
 
         for _ in range(options.max_turns):
             response = await asyncio.to_thread(
@@ -270,9 +272,7 @@ class OpenAIAgentRuntime:
                 model=self.model,
                 input=input_items,
                 tools=tools or None,
-                previous_response_id=previous_response_id,
             )
-            previous_response_id = response.id
             output = list(getattr(response, "output", []) or [])
 
             tool_outputs: list[dict[str, Any]] = []
@@ -282,6 +282,20 @@ class OpenAIAgentRuntime:
                     text = _message_text(item)
                     if text:
                         messages.append({"type": "assistant", "content": [text]})
+                elif item_type == "mcp_list_tools":
+                    server_label = getattr(item, "server_label", None)
+                    imported_tools = getattr(item, "tools", None) or []
+                    _progress(
+                        options,
+                        f"MCP 工具导入: server={server_label} count={len(imported_tools)}",
+                    )
+                    messages.append(
+                        {
+                            "type": "mcp_list_tools",
+                            "server_label": server_label,
+                            "tools": imported_tools,
+                        }
+                    )
                 elif item_type == "function_call":
                     tool_name = getattr(item, "name", "")
                     args = _loads_json(getattr(item, "arguments", "{}"))
@@ -296,6 +310,7 @@ class OpenAIAgentRuntime:
                         max_turns=options.max_turns,
                         verbose=options.verbose,
                         progress_prefix=options.progress_prefix,
+                        mcp_tools=mcp_tools,
                     )
                     tool_outputs.append(
                         {
@@ -305,14 +320,26 @@ class OpenAIAgentRuntime:
                         }
                     )
                 elif item_type in {"mcp_call", "mcp_approval_request"}:
-                    messages.append({"type": item_type, "tool": getattr(item, "name", None)})
+                    tool_name = getattr(item, "name", None)
+                    error = getattr(item, "error", None)
+                    _progress(options, f"MCP 事件: type={item_type} tool={tool_name} error={error}")
+                    messages.append({"type": item_type, "tool": tool_name, "error": error})
 
             if not tool_outputs:
                 _progress(options, "OpenAI Responses 完成，未等待更多工具结果")
                 messages.append({"type": "result", "subtype": "success", "content": _response_text(response)})
                 return messages
 
-            input_items = tool_outputs
+            # Some OpenAI-compatible providers do not retain function calls behind
+            # previous_response_id. Re-send the response output with tool results so
+            # the call_id is always present in the next request.
+            serialized_output = [
+                item.model_dump(exclude_none=True)
+                if hasattr(item, "model_dump")
+                else item
+                for item in output
+            ]
+            input_items = [*input_items, *serialized_output, *tool_outputs]
 
         messages.append({"type": "result", "subtype": "max_turns", "content": None})
         return messages
@@ -338,7 +365,12 @@ class OpenAIAgentRuntime:
         ]
         if options.agents and (not allowed or "Agent" in allowed):
             tools.append({"type": "function", "function": _openai_agent_function_schema(options.allowed_agents or sorted(options.agents))})
-        _progress(options, f"OpenAI Chat Completions 启动，tools={len(tools)}")
+        mcp_tools = await self._load_mcp_tools(options, allowed, chat_completions=True)
+        tools.extend(tool_schema for tool_schema, _, _ in mcp_tools.values())
+        _progress(
+            options,
+            f"OpenAI Chat Completions 启动，tools={len(tools)}，mcp_tools={len(mcp_tools)}",
+        )
 
         chat_messages: list[dict[str, Any]] = []
         if options.agents:
@@ -383,6 +415,7 @@ class OpenAIAgentRuntime:
                     max_turns=options.max_turns,
                     verbose=options.verbose,
                     progress_prefix=options.progress_prefix,
+                    mcp_tools=mcp_tools,
                 )
                 chat_messages.append(
                     {
@@ -406,10 +439,35 @@ class OpenAIAgentRuntime:
         max_turns: int = 20,
         verbose: bool = False,
         progress_prefix: str = "agent",
+        mcp_tools: dict[
+            str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient | StdioMcpClient, McpTool]
+        ] | None = None,
     ) -> Any:
         if name == "Agent":
             _progress_from_values(progress_prefix, verbose, f"调用子 Agent: {_summarize_tool_args(args)}")
             return await self._call_subagent(args, cwd=cwd, hooks=hooks or {}, agents=agents or {}, max_turns=max_turns)
+
+        mcp_entry = (mcp_tools or {}).get(name)
+        if mcp_entry:
+            _, client, tool = mcp_entry
+            denied = await _run_pre_hooks(name, args, hooks or {})
+            if denied:
+                return denied
+            error: Exception | None = None
+            try:
+                result = await asyncio.to_thread(client.call_tool, tool.server_name, args)
+                _progress_from_values(
+                    progress_prefix,
+                    verbose,
+                    f"MCP 工具完成: {name} {_summarize_tool_result(result)}",
+                )
+                return result
+            except Exception as exc:
+                error = exc
+                _progress_from_values(progress_prefix, verbose, f"MCP 工具失败: {name} error={exc}")
+                return {"error": str(exc)}
+            finally:
+                await _run_post_hooks(name, locals().get("result", {}), error, hooks or {})
 
         definition = get_registered_tool(name)
         if definition is None:
@@ -436,6 +494,39 @@ class OpenAIAgentRuntime:
             return {"error": str(exc)}
         finally:
             await _run_post_hooks(name, locals().get("result", {}), error, hooks or {})
+
+    async def _load_mcp_tools(
+        self,
+        options: RuntimeOptions,
+        allowed: set[str],
+        *,
+        chat_completions: bool = False,
+    ) -> dict[
+        str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient | StdioMcpClient, McpTool]
+    ]:
+        imported: dict[
+            str, tuple[dict[str, Any], HttpMcpClient | SseMcpClient | StdioMcpClient, McpTool]
+        ] = {}
+        for client in create_mcp_clients(options.remote_mcp_servers):
+            tools = await asyncio.to_thread(client.list_tools)
+            selected = [tool for tool in tools if not allowed or tool.exposed_name in allowed]
+            _progress(
+                options,
+                f"MCP 工具导入: server={client.server_label} count={len(selected)}/{len(tools)}",
+            )
+            for tool in selected:
+                function_schema = {
+                    "name": tool.exposed_name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                }
+                schema = (
+                    {"type": "function", "function": function_schema}
+                    if chat_completions
+                    else {"type": "function", **function_schema}
+                )
+                imported[tool.exposed_name] = (schema, client, tool)
+        return imported
 
     async def _call_subagent(
         self,
