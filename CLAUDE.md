@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A CLI-only agent that reviews Yunxiao (云效) Merge Requests via either the Claude Agent SDK or the OpenAI SDK and posts a single Chinese-language Markdown comment back to the MR. Yunxiao review now uses the same local tool chain in both runtimes. Also includes a standalone Feishu bot (long-connection/WebSocket mode) under `src/lark/`.
+A CLI-only agent that reviews Yunxiao (云效) Merge Requests via either the Claude Agent SDK or the OpenAI SDK and posts a single Chinese-language Markdown comment back to the MR. Yunxiao review uses MCP tools in both runtimes: Claude mode delegates stdio MCP to the Claude Agent SDK, while OpenAI mode connects to HTTP/SSE MCP directly and exposes those MCP tools as ordinary function tools. Also includes a standalone Feishu bot (long-connection/WebSocket mode) under `src/lark/`.
 
 ## Build and Test Commands
 
@@ -117,7 +117,7 @@ Per `YUNXIAO_MR_AGENT` prompt requirements:
 
 ### Permission Mode
 
-`CodeReviewAgent._get_options()` uses `permission_mode="bypassPermissions"` so tool calls run unattended. This requires running as a non-root user.
+`ClaudeAgentRuntime` reads `CLAUDE_PERMISSION_MODE` and defaults to `bypassPermissions` so tool calls run unattended. This requires running as a non-root user when using Claude mode.
 
 ### Prompt Configuration
 

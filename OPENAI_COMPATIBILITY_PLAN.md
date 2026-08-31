@@ -59,9 +59,9 @@
 - [x] 统一 Claude/OpenAI 的云效 MCP 配置构建逻辑。
 - [x] 删除或实现 `src/tools/yunxiao_tools.py` 中的占位工具。
 - [x] 清理陈旧测试和已删除模块引用。
-- [ ] 修正 README 中不存在的 FastAPI、`run.py`、`src/main.py` 和 models 描述。
-- [ ] 更新 CLAUDE.md 的实际 MCP 工具链说明。
-- [ ] 补充 OpenAI-compatible 配置矩阵、故障排查和真实验证步骤。
+- [x] 修正 README 中不存在的 FastAPI、`run.py`、`src/main.py` 和 models 描述。
+- [x] 更新 CLAUDE.md 的实际 MCP 工具链说明。
+- [x] 补充 OpenAI-compatible 配置矩阵、故障排查和真实验证步骤。
 
 ## 完成记录
 
@@ -85,3 +85,4 @@
 | 2026-08-31 | 统一云效 MCP 配置 | Claude/OpenAI 共用 transport/token/toolsets 读取逻辑；OpenAI HTTP/SSE 同时发送 Authorization 与 X-Yunxiao-Token；SSE 建连保留配置 headers；定向测试 45 passed |
 | 2026-08-28 | SDK 依赖按 Provider 延迟检查 | CLI 不再顶层同时导入 OpenAI/Claude SDK；OpenAI provider 不要求 Claude SDK，Claude provider 不要求 OpenAI SDK；定向测试 32 passed，全量 319 passed |
 | 2026-08-31 | 删除云效本地占位工具 | 删除 `src/tools/yunxiao_tools.py`，文档改为真实 `mcp__yunxiao__*` 工具链 |
+| 2026-08-31 | 文档收口 | README 改为 CLI-only 当前架构，删除 FastAPI/run.py/src.main/models 描述；CLAUDE.md 更新为真实 Claude stdio MCP 与 OpenAI HTTP/SSE MCP 工具链；补充 OpenAI-compatible 配置矩阵 |

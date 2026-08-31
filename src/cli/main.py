@@ -260,7 +260,7 @@ def main():
   python cli.py yunxiao-mr -r 3865544 -m 968 -d security
 
   # 审查本地文件
-  python cli.py files src/main.py
+  python cli.py files src/agents/reviewer.py
 
   # 审查 Git diff
   python cli.py diff -b main -t feature

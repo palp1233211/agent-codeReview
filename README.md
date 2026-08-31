@@ -1,28 +1,30 @@
-# Code Review Agent Service
+# Code Review Agent
 
-支持 Claude Agent SDK 与 OpenAI SDK 双运行时的智能代码审查服务，云效 MR 审查走同一套本地工具链，可在两种 SDK 间切换而不影响功能。
+支持 Claude Agent SDK 与 OpenAI SDK 双运行时的智能代码审查 CLI。云效 MR 审查统一走 Yunxiao MCP：Claude 模式由 Claude Agent SDK 管理 stdio MCP，OpenAI 模式由项目内 HTTP/SSE MCP client 转成普通 function tools。
 
 ## 功能特性
 
 - **多维度审查**: 安全漏洞、代码质量、性能问题
 - **云效 MR 审查**: 自动审查云效平台的 Merge Request 并添加评论
-- **自定义 Tools**: Git diff、复杂度分析、Bandit 安全扫描、云效工具
+- **自定义 Tools**: Git diff、复杂度分析、Bandit 安全扫描
+- **Yunxiao MCP**: MR 详情、patch set、diff、文件读取和评论发布都通过 `mcp__yunxiao__*` 工具完成
 - **Hooks 系统**: PreToolUse 验证、PostToolUse 审计
-- **API 服务**: FastAPI HTTP 接口 + SSE 流式响应
 - **CLI 工具**: 命令行快速审查
+- **飞书长连接 Bot**: 可选运行 `lark-bot`，把群消息转发到 Dify，并支持知识缺口流程
 
 ## 项目结构
 
 ```
 my-agent/
 ├── src/
-│   ├── main.py                 # FastAPI 服务入口
 │   ├── cli/
 │   │   ├── __init__.py
 │   │   └── main.py             # CLI 入口（支持 Claude/OpenAI 双 SDK）
 │   ├── agents/
-│   │   └── reviewer.py         # Code Review Agent（动态加载提示词）
-│   ├── prompts/                # 🆕 提示词配置模块
+│   │   ├── reviewer.py         # Code Review Agent（动态加载提示词）
+│   │   ├── runtime.py          # Claude/OpenAI provider-neutral runtime
+│   │   └── mcp_client.py       # OpenAI 模式 HTTP/SSE MCP client
+│   ├── prompts/                # 提示词配置模块
 │   │   ├── __init__.py         # 加载函数
 │   │   ├── security.yaml       # 安全审查规则
 │   │   ├── quality.yaml        # 质量审查规则
@@ -38,10 +40,11 @@ my-agent/
 │   │   └── linter.py           # Bandit 安全扫描 Tools
 │   ├── hooks/
 │   │   └── validation.py       # PreToolUse/PostToolUse Hooks
-│   └── models/
-│       └── schemas.py          # API 数据模型
+│   ├── lark/                   # 飞书 WebSocket Bot 和消息发送
+│   ├── dify/                   # Dify Chatflow / Dataset client
+│   ├── knowledge/              # 知识缺口填充与同步流程
+│   └── storage/                # MySQL conversation / KB 状态存储
 ├── cli.py                      # CLI 入口脚本
-├── run.py                      # 服务启动脚本
 ├── .env                        # 环境变量配置（API Key 等）
 ├── tests/
 └── requirements.txt
@@ -67,10 +70,11 @@ pip install -r requirements.txt
 # YUNXIAO_MCP_URL=https://openapi-rdc.aliyuncs.com/ai/mcp?toolsets=code-management
 # OpenAI 模式由 my-agent 直接连接 HTTP MCP，不要求模型供应商原生支持 type=mcp
 
-# 启动服务
-python run.py
-# 或
-uvicorn src.main:app --reload
+# 审查云效 MR
+python cli.py yunxiao-mr -r 3865544 -m 968 --business default
+
+# 本地文件审查
+python cli.py files src/agents/reviewer.py -d security quality
 ```
 
 ## 服务器部署
@@ -91,82 +95,22 @@ pip install -r requirements.txt
 cp .env.example .env
 vim .env  # 配置 API Key、云效 Token 等
 
-# 4. 运行方式选择
-
-# 方式 A - CLI 直接运行
+# 4. CLI 直接运行
 python cli.py yunxiao-mr -r 3865544 -m 968 --business default
 
-# 方式 B - 启动 API 服务
-uvicorn src.main:app --host 0.0.0.0 --port 8000
-
-# 方式 C - 后台服务（推荐生产环境）
-nohup uvicorn src.main:app --host 0.0.0.0 --port 8000 > app.log 2>&1 &
+# 5. 可选：启动飞书长连接 Bot
+python cli.py lark-bot
 ```
 
 **生产环境建议**：
-- 使用 systemd 或 supervisor 管理 uvicorn 服务进程
-- 配置 Nginx 反向代理（HTTPS、负载均衡）
+- 使用 systemd 或 supervisor 管理 `python cli.py lark-bot` 等长驻进程
 - 日志输出到 `/var/log/my-agent/` 目录
-
-## API 使用
-
-### 通用审查接口
-
-```bash
-# 审查 Git diff
-curl -X POST http://localhost:8000/review \
-  -H "Content-Type: application/json" \
-  -d '{"source": {"type": "git_diff", "base_branch": "main", "target_branch": "feature"}}'
-
-# 审查指定文件
-curl -X POST http://localhost:8000/review \
-  -H "Content-Type: application/json" \
-  -d '{"source": {"type": "files", "paths": ["src/main.py"]}}'
-
-# 审查代码片段
-curl -X POST http://localhost:8000/review \
-  -H "Content-Type: application/json" \
-  -d '{"source": {"type": "code_snippet", "code": "def hello(): print(hello)", "language": "python"}}'
-```
-
-### 云效 MR 审查接口
-
-```bash
-# 审查云效 MR 并自动添加评论
-curl -X POST http://localhost:8000/review/yunxiao-mr \
-  -H "Content-Type: application/json" \
-  -d '{
-    "repository_id": "2835387",
-    "local_id": "42",
-    "organization_id": "5ea86562f89c9700014a671f",
-    "auto_comment": true
-  }'
-
-# 🆕 指定业务类型审查
-curl -X POST http://localhost:8000/review/yunxiao-mr \
-  -H "Content-Type: application/json" \
-  -d '{
-    "repository_id": "2835387",
-    "local_id": "42",
-    "organization_id": "5ea86562f89c9700014a671f",
-    "auto_comment": true,
-    "business_type": "frontend"
-  }'
-
-# 流式审查云效 MR (SSE)
-curl -X POST http://localhost:8000/review/yunxiao-mr/stream \
-  -H "Content-Type: application/json" \
-  -d '{
-    "repository_id": "2835387",
-    "local_id": "42"
-  }'
-```
 
 ## CLI 使用
 
 ```bash
 # 审查文件
-python cli.py files src/main.py src/utils.py -d security quality
+python cli.py files src/agents/reviewer.py src/agents/runtime.py -d security quality
 
 # 审查 Git diff
 python cli.py diff -b main -t feature/my-feature
@@ -181,7 +125,7 @@ python cli.py yunxiao-mr \
   -o 5ea86562f89c9700014a671f \
   -d security quality
 
-# 🆕 指定业务类型审查
+# 指定业务类型审查
 python cli.py yunxiao-mr -r 2835387 -m 42 --business frontend  # 前端项目规则
 python cli.py yunxiao-mr -r 2835387 -m 42 --business backend   # 后端项目规则
 
@@ -207,7 +151,7 @@ python cli.py yunxiao-mr -r 2835387 -m 42 --no-comment
 | 性能 | performance-reviewer | analyze_complexity | N+1查询、内存泄漏 |
 | 云效MR | yunxiao-mr-reviewer | mcp__yunxiao__get_change_request, mcp__yunxiao__create_change_request_comment | 变更影响、合并风险 |
 
-### 🆕 业务场景配置
+### 业务场景配置
 
 | 业务类型 | 继承规则 | 额外关注点 |
 |---------|---------|-----------|
@@ -233,33 +177,70 @@ AGENT_PROVIDER=claude  # claude 或 openai
 
 # Claude 模式
 ANTHROPIC_API_KEY=your_api_key_here
+ANTHROPIC_BASE_URL=
 
 # OpenAI 模式
 OPENAI_API_KEY=your_api_key_here
-
-# 可选
 OPENAI_MODEL=gpt-5.4
 OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_API_MODE=responses
+OPENAI_API_MODE=responses  # responses 或 chat_completions
+
+# 云效 MR 审查
 YUNXIAO_ACCESS_TOKEN=your_yunxiao_token_here
+YUNXIAO_TOKEN=your_yunxiao_token_fallback
 YUNXIAO_ORG_ID=5ea86562f89c9700014a671f
+YUNXIAO_MCP_TRANSPORT=http  # http、streamable_http 或 sse；OpenAI 不支持 stdio
 YUNXIAO_MCP_URL=https://openapi-rdc.aliyuncs.com/ai/mcp?toolsets=code-management
 YUNXIAO_TOOLSETS=code-management
-SERVICE_PORT=8000
+
+# 本地工具限制
 MAX_FILE_SIZE_KB=500
 ```
+
+## OpenAI-compatible 配置矩阵
+
+| 场景 | 必需配置 | 说明 |
+|------|----------|------|
+| 官方 OpenAI | `AGENT_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_MODEL` | 默认使用 `OPENAI_API_MODE=responses` |
+| OpenAI-compatible | `AGENT_PROVIDER=openai_sdk`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` | 适合只兼容 OpenAI SDK 的第三方 endpoint |
+| Chat Completions only | `OPENAI_API_MODE=chat_completions` | 当 provider 不支持 Responses API function calling 时使用 |
+| 云效 MR 审查 | `YUNXIAO_MCP_URL`, `YUNXIAO_ACCESS_TOKEN` 或 `YUNXIAO_TOKEN` | OpenAI 模式支持 HTTP/SSE MCP，不支持 stdio |
+
+云效 MCP 默认发送 `Authorization: Bearer <token>`、`X-Yunxiao-Token: <token>` 和 `X-Devops-Toolsets`。`YUNXIAO_TOOLSETS` 为空时回退到 `code-management`。
+
+## OpenAI-compatible 故障排查
+
+- 缺少 `OPENAI_API_KEY` 或 `OPENAI_MODEL`：启动前会直接失败，先补齐 OpenAI runtime 必需配置。
+- `AGENT_PROVIDER=openai_sdk` 缺少 `OPENAI_BASE_URL`：该模式面向第三方兼容 endpoint，必须显式配置 base URL。
+- 云效 MR 审查缺少 `YUNXIAO_MCP_URL` 或 token：只有 `yunxiao-mr` 命令会要求云效 MCP 配置，本地 `files` / `diff` 审查不需要。
+- provider 不支持 Responses API function calling：设置 `OPENAI_API_MODE=chat_completions` 后重试。
+- 云效 MCP 鉴权失败：确认 token 同时可用于 `Authorization` 和 `X-Yunxiao-Token`，并确认 `YUNXIAO_TOOLSETS` 包含 `code-management`。
+
+## 真实验证步骤
+
+```bash
+# 1. 基础环境检查
+python cli.py files src/agents/reviewer.py -d quality
+
+# 2. OpenAI-compatible 本地工具调用 smoke
+AGENT_PROVIDER=openai_sdk OPENAI_API_MODE=responses \
+  python cli.py files src/agents/reviewer.py -d quality
+
+# 3. 云效 MR 只读审查，不发评论
+AGENT_PROVIDER=openai_sdk OPENAI_API_MODE=responses \
+  python cli.py yunxiao-mr -r <repo_id> -m <mr_id> --no-comment
+```
+
+记录 provider、`OPENAI_API_MODE`、模型名、云效 MCP 工具清单、退出码和关键错误日志；不要在自动化 smoke test 中发布 MR 评论。
 
 ## 开发测试
 
 ```bash
 # 运行测试
-pytest tests/
-
-# 查看审计日志
-curl http://localhost:8000/audit-log
+venv/bin/python -m pytest -q -p no:cacheprovider
 ```
 
-## 🆕 自定义业务规则
+## 自定义业务规则
 
 在 `src/prompts/business/` 目录下创建新的 YAML 文件即可添加业务场景：
 
@@ -278,10 +259,5 @@ custom_prompt: |
 
 使用方式：
 ```bash
-# CLI
 python cli.py yunxiao-mr -r 3865544 -m 42 --business mobile
-
-# API
-curl -X POST http://localhost:8000/review/yunxiao-mr \
-  -d '{"repository_id": "3865544", "local_id": "42", "business_type": "mobile"}'
 ```
