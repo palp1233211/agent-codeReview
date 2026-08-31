@@ -94,19 +94,23 @@ Run `python cli.py kb-doctor` before deploying — it verifies mounted paths, cr
 
 ### Yunxiao MR Review Flow
 
-The agent uses the same provider-neutral local tool chain in both runtimes. Tool sequence:
+The agent uses Yunxiao MCP tools in both runtimes. Claude mode delegates MCP
+transport to the Claude Agent SDK stdio server; OpenAI mode connects to
+HTTP/SSE MCP directly and exposes those tools as OpenAI function tools. Tool
+sequence:
 
-1. `get_yunxiao_mr` → MR details
-2. `get_yunxiao_mr_diff` → branch diff
-3. `get_yunxiao_mr_files` / `get_yunxiao_file_content` → full file content for changed files
-4. `comment_on_yunxiao_mr` → publish review comment (GLOBAL_COMMENT, single call)
+1. `mcp__yunxiao__get_change_request` → MR details
+2. `mcp__yunxiao__list_change_request_patch_sets` → source/target patch sets
+3. `mcp__yunxiao__compare` → MR diff
+4. `mcp__yunxiao__get_file_blobs` → full file content when the diff is insufficient
+5. `mcp__yunxiao__create_change_request_comment` → publish review comment (GLOBAL_COMMENT, single call)
 
 ## Important Patterns
 
 ### Comment Strategy for Yunxiao MR
 
 Per `YUNXIAO_MR_AGENT` prompt requirements:
-- **Only ONE** `create_change_request_comment` call per review
+- **Only ONE** `mcp__yunxiao__create_change_request_comment` call per review
 - Must use `commentType="GLOBAL_COMMENT"`
 - All findings merged into a single Markdown-formatted comment
 - **Language**: all output must be in Chinese (中文)

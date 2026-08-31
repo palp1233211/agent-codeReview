@@ -135,6 +135,15 @@ def test_openai_yunxiao_sse_configuration_is_preserved(monkeypatch):
     assert config["headers"]["X-Yunxiao-Token"] == "test-token"
 
 
+def test_yunxiao_mr_agent_uses_only_mcp_tools():
+    tool_names = list(reviewer.YUNXIAO_MR_AGENT.tools)
+
+    assert tool_names
+    assert all(name.startswith("mcp__yunxiao__") for name in tool_names)
+    assert "get_yunxiao_mr" not in tool_names
+    assert "comment_on_yunxiao_mr" not in tool_names
+
+
 def test_yunxiao_mcp_config_uses_shared_token_fallback_and_toolsets(monkeypatch):
     monkeypatch.setenv("YUNXIAO_MCP_TRANSPORT", "http")
     monkeypatch.setenv("YUNXIAO_MCP_URL", "https://example.test/mcp")

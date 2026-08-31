@@ -57,7 +57,7 @@
 - [x] Claude/OpenAI SDK 改为按 Provider 延迟导入或 optional dependencies。
 - [ ] 评估 OpenAI-only 镜像是否仍需 Node.js 和 Claude CLI。
 - [x] 统一 Claude/OpenAI 的云效 MCP 配置构建逻辑。
-- [ ] 删除或实现 `src/tools/yunxiao_tools.py` 中的占位工具。
+- [x] 删除或实现 `src/tools/yunxiao_tools.py` 中的占位工具。
 - [x] 清理陈旧测试和已删除模块引用。
 - [ ] 修正 README 中不存在的 FastAPI、`run.py`、`src/main.py` 和 models 描述。
 - [ ] 更新 CLAUDE.md 的实际 MCP 工具链说明。
@@ -84,3 +84,4 @@
 | 2026-08-28 | OpenAI-compatible endpoint smoke | 使用项目 OpenAI runtime 发起无工具 Responses 请求，模型返回 OK，退出码 0；真实云效 MCP 当前网络连接超时，initialize/tools-list 保持未完成 |
 | 2026-08-31 | 统一云效 MCP 配置 | Claude/OpenAI 共用 transport/token/toolsets 读取逻辑；OpenAI HTTP/SSE 同时发送 Authorization 与 X-Yunxiao-Token；SSE 建连保留配置 headers；定向测试 45 passed |
 | 2026-08-28 | SDK 依赖按 Provider 延迟检查 | CLI 不再顶层同时导入 OpenAI/Claude SDK；OpenAI provider 不要求 Claude SDK，Claude provider 不要求 OpenAI SDK；定向测试 32 passed，全量 319 passed |
+| 2026-08-31 | 删除云效本地占位工具 | 删除 `src/tools/yunxiao_tools.py`，文档改为真实 `mcp__yunxiao__*` 工具链 |

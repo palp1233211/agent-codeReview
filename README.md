@@ -35,8 +35,7 @@ my-agent/
 │   ├── tools/
 │   │   ├── git_tools.py        # Git diff Tools
 │   │   ├── complexity.py       # 代码复杂度 Tools
-│   │   ├── linter.py           # Bandit 安全扫描 Tools
-│   │   └── yunxiao_tools.py    # 云效 MR Tools
+│   │   └── linter.py           # Bandit 安全扫描 Tools
 │   ├── hooks/
 │   │   └── validation.py       # PreToolUse/PostToolUse Hooks
 │   └── models/
@@ -192,11 +191,12 @@ python cli.py yunxiao-mr -r 2835387 -m 42 --no-comment
 
 ## 云效 MR 审查流程
 
-1. **获取 MR 详情** - 使用 `get_yunxiao_mr` 获取标题、描述、分支信息
-2. **获取代码差异** - 使用 `get_yunxiao_mr_diff` 比较源分支和目标分支
-3. **读取变更文件** - 使用 `get_yunxiao_file_content` 读取完整内容
-4. **多维度审查** - 调用 security/quality/performance subagents
-5. **添加评论** - 使用 `comment_on_yunxiao_mr` 在 MR 上添加审查评论
+1. **获取 MR 详情** - 使用 `mcp__yunxiao__get_change_request` 获取标题、描述、分支信息
+2. **定位源/目标版本** - 使用 `mcp__yunxiao__list_change_request_patch_sets` 获取 patch set
+3. **获取代码差异** - 使用 `mcp__yunxiao__compare` 比较源分支和目标分支
+4. **读取变更文件** - 必要时使用 `mcp__yunxiao__get_file_blobs` 读取完整内容
+5. **多维度审查** - 调用 security/quality/performance subagents
+6. **添加评论** - 使用 `mcp__yunxiao__create_change_request_comment` 在 MR 上添加审查评论
 
 ## 审查维度
 
@@ -205,7 +205,7 @@ python cli.py yunxiao-mr -r 2835387 -m 42 --no-comment
 | 安全 | security-reviewer | security_scan, check_secrets | SQL注入、XSS、敏感信息 |
 | 质量 | quality-reviewer | analyze_complexity, check_code_duplication | 命名、结构、复杂度 |
 | 性能 | performance-reviewer | analyze_complexity | N+1查询、内存泄漏 |
-| 云效MR | yunxiao-mr-reviewer | get_yunxiao_mr, comment_on_yunxiao_mr | 变更影响、合并风险 |
+| 云效MR | yunxiao-mr-reviewer | mcp__yunxiao__get_change_request, mcp__yunxiao__create_change_request_comment | 变更影响、合并风险 |
 
 ### 🆕 业务场景配置
 

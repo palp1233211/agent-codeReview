@@ -93,7 +93,7 @@ async def cmd_yunxiao_mr(
     tools_used = result.get("tools_used", [])
     comment_calls = [
         t for t in tools_used
-        if "comment_on_yunxiao_mr" in t or "create_change_request_comment" in t
+        if "mcp__yunxiao__create_change_request_comment" in t
     ]
 
     if result.get("is_error"):
