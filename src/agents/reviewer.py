@@ -1,4 +1,5 @@
 """Code Review Agent 核心实现"""
+from dataclasses import dataclass
 import os
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
@@ -15,6 +16,28 @@ from ..prompts import (
 # 默认组织 ID
 DEFAULT_ORG_ID = os.getenv("YUNXIAO_ORG_ID", "5ea86562f89c9700014a671f")
 OPENAI_PROVIDERS = {"openai", "openai_sdk"}
+YUNXIAO_MCP_SERVER_LABEL = "yunxiao"
+YUNXIAO_MCP_DEFAULT_TOOLSETS = "code-management"
+
+
+@dataclass(frozen=True)
+class YunxiaoMcpSettings:
+    transport: str
+    server_url: str | None
+    token: str
+    toolsets: str
+
+
+def _get_yunxiao_mcp_settings() -> YunxiaoMcpSettings:
+    """Read shared Yunxiao MCP settings for Claude and OpenAI runtimes."""
+    transport = os.getenv("YUNXIAO_MCP_TRANSPORT", "http").strip().lower().replace("-", "_")
+    toolsets = os.getenv("YUNXIAO_TOOLSETS", YUNXIAO_MCP_DEFAULT_TOOLSETS).strip()
+    return YunxiaoMcpSettings(
+        transport=transport,
+        server_url=os.getenv("YUNXIAO_MCP_URL"),
+        token=os.getenv("YUNXIAO_ACCESS_TOKEN") or os.getenv("YUNXIAO_TOKEN") or "",
+        toolsets=toolsets or YUNXIAO_MCP_DEFAULT_TOOLSETS,
+    )
 
 
 def validate_openai_runtime_config(
@@ -46,51 +69,48 @@ def validate_openai_runtime_config(
 
 def _get_yunxiao_mcp_config() -> dict[str, Any]:
     """获取 OpenAI runtime 通过 HTTP 连接的云效 MCP 配置。"""
-    transport = os.getenv("YUNXIAO_MCP_TRANSPORT", "http").strip().lower().replace("-", "_")
-    if transport == "stdio":
+    settings = _get_yunxiao_mcp_settings()
+    if settings.transport == "stdio":
         raise ValueError(
             "OpenAI runtime 不支持 stdio MCP；请配置 YUNXIAO_MCP_TRANSPORT=http/sse "
             "和 YUNXIAO_MCP_URL，或改用 AGENT_PROVIDER=claude。"
         )
-    if transport not in {"http", "streamable_http", "sse"}:
-        raise ValueError(f"不支持的 YUNXIAO_MCP_TRANSPORT: {transport}")
+    if settings.transport not in {"http", "streamable_http", "sse"}:
+        raise ValueError(f"不支持的 YUNXIAO_MCP_TRANSPORT: {settings.transport}")
     headers = {}
-    token = os.getenv("YUNXIAO_ACCESS_TOKEN") or os.getenv("YUNXIAO_TOKEN")
-    toolsets = os.getenv("YUNXIAO_TOOLSETS", "code-management")
-    server_url = os.getenv("YUNXIAO_MCP_URL")
-    if not server_url:
+    if not settings.server_url:
         raise ValueError(
             "OpenAI 云效 MR 审查缺少 YUNXIAO_MCP_URL；"
             "请配置 Streamable HTTP/SSE MCP 地址。"
         )
-    if not token:
+    if not settings.token:
         raise ValueError(
             "OpenAI 云效 MR 审查缺少 YUNXIAO_ACCESS_TOKEN；"
             "请配置云效访问令牌。"
         )
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    headers["X-Devops-Toolsets"] = toolsets
+    headers["Authorization"] = f"Bearer {settings.token}"
+    headers["X-Yunxiao-Token"] = settings.token
+    headers["X-Devops-Toolsets"] = settings.toolsets
     config: dict[str, Any] = {
         "type": "mcp",
-        "server_label": "yunxiao",
-        "server_url": server_url,
-        "transport": "sse" if transport == "sse" else "http",
+        "server_label": YUNXIAO_MCP_SERVER_LABEL,
+        "server_url": settings.server_url,
+        "transport": "sse" if settings.transport == "sse" else "http",
         "require_approval": "never",
     }
-    if headers:
-        config["headers"] = headers
+    config["headers"] = headers
     return config
 
 
 def _get_yunxiao_claude_mcp_config() -> dict[str, Any]:
     """获取 Claude Agent SDK 的 stdio 云效 MCP 配置。"""
+    settings = _get_yunxiao_mcp_settings()
     return {
         "command": "npx",
         "args": ["-y", "alibabacloud-devops-mcp-server"],
         "env": {
-            "YUNXIAO_ACCESS_TOKEN": os.getenv("YUNXIAO_ACCESS_TOKEN", ""),
-            "DEVOPS_TOOLSETS": "code-management",
+            "YUNXIAO_ACCESS_TOKEN": settings.token,
+            "DEVOPS_TOOLSETS": settings.toolsets,
         },
     }
 

@@ -132,6 +132,35 @@ def test_openai_yunxiao_sse_configuration_is_preserved(monkeypatch):
     assert config["transport"] == "sse"
     assert config["server_url"] == "https://example.test/sse"
     assert config["headers"]["Authorization"] == "Bearer test-token"
+    assert config["headers"]["X-Yunxiao-Token"] == "test-token"
+
+
+def test_yunxiao_mcp_config_uses_shared_token_fallback_and_toolsets(monkeypatch):
+    monkeypatch.setenv("YUNXIAO_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("YUNXIAO_MCP_URL", "https://example.test/mcp")
+    monkeypatch.delenv("YUNXIAO_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("YUNXIAO_TOKEN", "fallback-token")
+    monkeypatch.setenv("YUNXIAO_TOOLSETS", "code-management,organization")
+
+    openai_config = reviewer._get_yunxiao_mcp_config()  # noqa: SLF001
+    claude_config = reviewer._get_yunxiao_claude_mcp_config()  # noqa: SLF001
+
+    assert openai_config["headers"]["Authorization"] == "Bearer fallback-token"
+    assert openai_config["headers"]["X-Yunxiao-Token"] == "fallback-token"
+    assert openai_config["headers"]["X-Devops-Toolsets"] == "code-management,organization"
+    assert claude_config["env"]["YUNXIAO_ACCESS_TOKEN"] == "fallback-token"
+    assert claude_config["env"]["DEVOPS_TOOLSETS"] == "code-management,organization"
+
+
+def test_yunxiao_mcp_config_falls_back_to_default_toolsets(monkeypatch):
+    monkeypatch.setenv("YUNXIAO_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("YUNXIAO_MCP_URL", "https://example.test/mcp")
+    monkeypatch.setenv("YUNXIAO_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("YUNXIAO_TOOLSETS", "  ")
+
+    config = reviewer._get_yunxiao_mcp_config()  # noqa: SLF001
+
+    assert config["headers"]["X-Devops-Toolsets"] == "code-management"
 
 
 def test_openai_yunxiao_configuration_requires_url(monkeypatch):

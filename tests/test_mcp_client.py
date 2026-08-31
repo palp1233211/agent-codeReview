@@ -273,6 +273,31 @@ def test_legacy_sse_timeout_is_structured_error():
         client.call_tool("ping", {})
 
 
+def test_legacy_sse_connect_sends_configured_headers():
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.iter_lines.return_value = iter(
+        [
+            b"event: endpoint",
+            b"data: /messages?sessionId=session-1",
+            b"",
+        ]
+    )
+    client = SseMcpClient(
+        server_label="yunxiao",
+        server_url="https://example.test/sse",
+        headers={"X-Yunxiao-Token": "secret"},
+        timeout=0.01,
+    )
+    client._stream_session.get = Mock(return_value=response)  # noqa: SLF001
+
+    client._connect()  # noqa: SLF001
+
+    headers = client._stream_session.get.call_args.kwargs["headers"]  # noqa: SLF001
+    assert headers["Accept"] == "text/event-stream"
+    assert headers["X-Yunxiao-Token"] == "secret"
+
+
 def test_legacy_sse_connect_timeout_stops_background_thread():
     import threading
 

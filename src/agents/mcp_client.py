@@ -253,7 +253,7 @@ class SseMcpClient:
             try:
                 response = self._stream_session.get(
                     self.server_url,
-                    headers={"Accept": "text/event-stream"},
+                    headers={**self._stream_session.headers, "Accept": "text/event-stream"},
                     stream=True,
                     timeout=(self.timeout, None),
                 )
