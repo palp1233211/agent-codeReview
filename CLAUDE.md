@@ -22,6 +22,10 @@ python cli.py lark-bot
 
 # Tests
 pytest tests/
+
+# Docker images
+docker build --target openai-runtime -t my-agent:openai .
+docker build --target full-runtime -t my-agent:full .
 ```
 
 ## Environment Setup
@@ -91,6 +95,7 @@ Run `python cli.py kb-doctor` before deploying — it verifies mounted paths, cr
 - **Summaries survive nothing.** `update-by-text` recreates all segments with new ids, so per-segment `summary` values are wiped. If the dataset's Summary Index is enabled they are regenerated asynchronously *after* `indexing-status` already reports `completed`; if it is disabled they are simply gone. `summary` is writable only via the segment-level API (`SegmentUpdateArgs`), never via `update-by-text`.
 - **Never push a block that has only a heading.** With no facts to work from, the summary model fabricates. Observed on a 20-char title-only chunk: it invented "cat=21 对应严重违规，cat=22 对应一般违规" — cat=21 is actually 客户投诉 and cat=22 does not exist. `render_for_dify` drops such blocks (`_has_body`).
 - Provider behavior differs: Claude mode keeps the original Claude Agent SDK stdio MCP mechanism. OpenAI mode connects HTTP MCP itself and presents ordinary function tools to the configured provider; use `OPENAI_API_MODE=chat_completions` only when the provider does not implement Responses API function calling.
+- Docker images are split by provider requirements. `openai-runtime` is Python-only and does not include Node, Claude Code CLI, or the npm Yunxiao MCP server. Use `full-runtime` when Claude provider or Claude stdio MCP support is required. Building without `--target` currently lands on `full-runtime` for backward compatibility.
 
 ### Yunxiao MR Review Flow
 

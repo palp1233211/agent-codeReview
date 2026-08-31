@@ -86,7 +86,7 @@ python cli.py files src/agents/reviewer.py -d security quality
 git clone <repo_url>
 cd my-agent
 
-# 2. 创建虚拟环境并安装依赖
+# 2. 本机部署：创建虚拟环境并安装依赖
 python3 -m venv venv
 source venv/bin/activate  # Linux/macOS
 pip install -r requirements.txt
@@ -101,6 +101,21 @@ python cli.py yunxiao-mr -r 3865544 -m 968 --business default
 # 5. 可选：启动飞书长连接 Bot
 python cli.py lark-bot
 ```
+
+### Docker 镜像选择
+
+```bash
+# OpenAI-only：不安装 Node、Claude CLI 或 npm 云效 MCP server
+docker build --target openai-runtime -t my-agent:openai .
+
+# 完整镜像：保留 Claude provider 和 Claude stdio Yunxiao MCP 能力
+docker build --target full-runtime -t my-agent:full .
+
+# 未指定 --target 时默认构建最后一个 target，即 full-runtime
+docker build -t my-agent:full .
+```
+
+OpenAI 模式通过 Python 直接连接 HTTP/SSE Yunxiao MCP，因此 OpenAI-only 镜像不需要 Node.js 和 Claude CLI。Claude 模式仍需要完整镜像里的 Node 22、`@anthropic-ai/claude-code` 和 `alibabacloud-devops-mcp-server`。
 
 **生产环境建议**：
 - 使用 systemd 或 supervisor 管理 `python cli.py lark-bot` 等长驻进程
