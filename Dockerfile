@@ -1,5 +1,5 @@
-# OpenAI-only runtime: Python only. OpenAI mode connects Yunxiao MCP over HTTP/SSE,
-# so it does not need Node.js, Claude Code CLI, or the npm Yunxiao MCP server.
+# Full application runtime using OpenAI: Yunxiao MCP review, Feishu bot, Dify,
+# and MySQL are included. It does not install Node.js, Claude Code CLI, or Claude SDK.
 FROM python:3.11-slim-bullseye AS openai-runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -9,8 +9,8 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 \
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-openai.txt .
+RUN pip install --no-cache-dir -r requirements-openai.txt
 
 COPY . .
 

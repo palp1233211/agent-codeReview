@@ -1,0 +1,15 @@
+# Complete application runtime using the OpenAI provider.
+# Claude SDK and Claude CLI dependencies intentionally stay out of this image.
+openai>=1.99.0
+
+# Feishu bot, Dify integration, and conversation / knowledge-gap persistence
+lark-oapi>=1.6.0
+requests>=2.32.0
+pymysql>=1.1
+
+# Configuration and local review / knowledge-base processing
+pyyaml>=6.0
+radon>=6.0
+pylint>=3.0
+bandit>=1.7
+python-dotenv>=1.0

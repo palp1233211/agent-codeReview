@@ -9,6 +9,7 @@ from collections import deque
 import lark_oapi as lark
 import pymysql
 import requests
+from lark_oapi.event.context import EventContext
 
 from ..dify.client import DifyClient
 from ..knowledge.commands import KbCommands
@@ -19,6 +20,30 @@ from ..storage.knowledge_gap_store import KnowledgeGapStore
 from .client import LarkClient
 
 logger = logging.getLogger(__name__)
+
+
+class FilteringEventDispatcherHandler:
+    """只把白名单事件交给 SDK dispatcher，其他事件静默确认。"""
+
+    def __init__(self, handler: lark.EventDispatcherHandler, allowed_event_keys: set[str]) -> None:
+        self._handler = handler
+        self._allowed_event_keys = allowed_event_keys
+
+    def _do_without_validation(self, payload: bytes):
+        # WS 模式下 SDK 会直接调用这个私有入口；先解密并读取事件类型，
+        # 否则未注册事件会在 SDK 内部打印 ``processor not found``。
+        plaintext = self._handler._decrypt(payload)
+        context = lark.JSON.unmarshal(plaintext, EventContext)
+        if context.schema:
+            event_key = f"p2.{context.header.event_type}"
+        else:
+            event_key = f"p1.{context.event.get('type')}"
+
+        if event_key not in self._allowed_event_keys:
+            logger.debug("忽略未启用的飞书事件: %s", event_key)
+            return None
+
+        return self._handler._do_without_validation(payload)
 
 
 def extract_text(message_content: str) -> str | None:
@@ -276,7 +301,7 @@ def run_ws_bot() -> int:
         logger.warning("获取机器人 open_id 失败（%s），群聊消息将被忽略，仅私聊可用。", exc)
         bot_open_id = None
 
-    event_handler = (
+    registered_event_handler = (
         lark.EventDispatcherHandler.builder("", "")
         .register_p2_im_message_receive_v1(
             build_message_receive_handler(
@@ -290,6 +315,13 @@ def run_ws_bot() -> int:
         )
         .register_p2_im_message_message_read_v1(on_message_read)
         .build()
+    )
+    event_handler = FilteringEventDispatcherHandler(
+        registered_event_handler,
+        {
+            "p2.im.message.receive_v1",
+            "p2.im.message.message_read_v1",
+        },
     )
 
     # WS client：长连接接收事件，免去公网回调地址和签名校验
