@@ -10,7 +10,6 @@ FOLDER_TOKEN = "UrcNfhwkalLeaKd1GRqcfKcSnvh"
 SUMMARY_TEMPLATE = "Nzoxd1LrPoCwQaxFOAdcXMm4nMh"
 COUNTRY_TEMPLATE = "Ou8tdObXMolH8VxQ0yzcd5K6nQh"
 CHAT_ID = "oc_02b6d626dd23a36c13ab1e3c6d80d21f"
-MENTION_USER_ID = "ou_59c70b3948d557b0edbf258050241b21"
 FEISHU_DOCX_BASE = "https://flashexpress.feishu.cn/docx"
 
 
@@ -100,43 +99,25 @@ def _branch_update(block_id: str, date_str: str) -> dict:
     }
 
 
-def _country_links_update(
+def _country_link_update(
     block: Any,
     date_str: str,
-    thai_token: str,
-    ph_token: str,
+    country: str,
+    doc_token: str,
 ) -> dict:
-    thai_url = encode_url(f"{FEISHU_DOCX_BASE}/{thai_token}")
-    ph_url = encode_url(f"{FEISHU_DOCX_BASE}/{ph_token}")
-    # 保留「泰国：」之前的原始元素（如模板中已有的 mention_user）
-    prefix = _elements_before(block, "泰国：")
+    """更新单个国家所在段落，保留该段落中原有的负责人 mention。"""
+    prefix = _elements_before(block, f"{country}：")
     return {
         "block_id": block.block_id,
         "update_text_elements": {
             "elements": prefix + [
-                {"text_run": {"content": "    泰国："}},
+                {"text_run": {"content": f"    {country}："}},
                 {
                     "mention_doc": {
-                        "token": thai_token,
+                        "token": doc_token,
                         "obj_type": 22,
-                        "url": thai_url,
-                        "title": f"BI {date_str} 迭代上线SQL及任务 -- 泰国",
-                    }
-                },
-                {"text_run": {"content": "\n"}},
-                {
-                    "mention_user": {
-                        "user_id": MENTION_USER_ID,
-                        "text_element_style": {},
-                    }
-                },
-                {"text_run": {"content": "    菲律宾："}},
-                {
-                    "mention_doc": {
-                        "token": ph_token,
-                        "obj_type": 22,
-                        "url": ph_url,
-                        "title": f"BI {date_str} 迭代上线SQL及任务 -- 菲律宾",
+                        "url": encode_url(f"{FEISHU_DOCX_BASE}/{doc_token}"),
+                        "title": f"BI {date_str} 迭代上线SQL及任务 -- {country}",
                     }
                 },
             ]
@@ -178,14 +159,16 @@ async def run_bi_weekly_doc(date_str: str | None = None) -> dict[str, Any]:
     # 步骤 4：更新汇总文档
     blocks = await asyncio.to_thread(client.list_document_blocks, summary_token)
     branch_block_id = _find_block_id(blocks, "1.上线分支：")
-    country_block = _find_block(blocks, "泰国：")
+    thai_block = _find_block(blocks, "泰国：")
+    ph_block = _find_block(blocks, "菲律宾：")
 
     await asyncio.to_thread(
         client.batch_update_blocks,
         summary_token,
         [
             _branch_update(branch_block_id, date_str),
-            _country_links_update(country_block, date_str, thai_token, ph_token),
+            _country_link_update(thai_block, date_str, "泰国", thai_token),
+            _country_link_update(ph_block, date_str, "菲律宾", ph_token),
         ],
     )
 
