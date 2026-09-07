@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import os
 from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .runtime import RuntimeOptions, create_agent_runtime
 from .. import tools as _tools  # noqa: F401 - importing registers local tools
@@ -18,6 +18,17 @@ DEFAULT_ORG_ID = os.getenv("YUNXIAO_ORG_ID", "5ea86562f89c9700014a671f")
 OPENAI_PROVIDERS = {"openai", "openai_sdk"}
 YUNXIAO_MCP_SERVER_LABEL = "yunxiao"
 YUNXIAO_MCP_DEFAULT_TOOLSETS = "code-management"
+YUNXIAO_MR_PATH_MARKERS = {
+    "change",
+    "changes",
+    "merge_request",
+    "merge_requests",
+    "merge-request",
+    "merge-requests",
+    "mr",
+    "pull",
+    "pulls",
+}
 
 
 @dataclass(frozen=True)
@@ -98,6 +109,11 @@ def _get_yunxiao_mcp_config() -> dict[str, Any]:
         "transport": "sse" if settings.transport == "sse" else "http",
         "require_approval": "never",
     }
+    timeout_value = os.getenv("YUNXIAO_MCP_TIMEOUT", "60").strip()
+    try:
+        config["timeout"] = max(1.0, float(timeout_value))
+    except ValueError:
+        raise ValueError("YUNXIAO_MCP_TIMEOUT 必须是正数") from None
     config["headers"] = headers
     return config
 
@@ -134,6 +150,63 @@ def _normalize_yunxiao_repository_id(repository_id: str) -> str:
     if "/" in value:
         return quote(unquote(value), safe="")
     return value
+
+
+def parse_yunxiao_mr_reference(
+    repository_or_url: str,
+    local_id: str | None = None,
+) -> tuple[str, str]:
+    """Resolve either a repository/MR pair or a Yunxiao MR URL.
+
+    The URL form is intentionally parsed only when a known MR path marker is
+    present. This avoids treating an arbitrary repository URL as an MR URL.
+    ``local_id`` remains accepted for backwards compatibility and must agree
+    with the ID in the URL when both are supplied.
+    """
+    value = repository_or_url.strip()
+    if not value:
+        raise ValueError("云效 MR 地址或仓库 ID 不能为空")
+
+    if not value.startswith(("http://", "https://")):
+        if local_id is None or not str(local_id).strip():
+            raise ValueError("使用仓库 ID 或仓库路径时必须同时提供 MR 编号")
+        return value, str(local_id).strip()
+
+    parsed = urlparse(value)
+    path_parts = [unquote(part) for part in parsed.path.split("/") if part]
+    query = parse_qs(parsed.query)
+
+    url_local_id = None
+    repository_parts: list[str] | None = None
+    for index, part in enumerate(path_parts[:-1]):
+        if part.lower() not in YUNXIAO_MR_PATH_MARKERS:
+            continue
+        candidate_local_id = path_parts[index + 1].strip()
+        if not candidate_local_id:
+            continue
+        url_local_id = candidate_local_id
+        repository_parts = path_parts[:index]
+        break
+
+    if url_local_id is None:
+        for key in ("localId", "local_id", "mrId", "mr_id", "changeRequestId"):
+            candidates = query.get(key)
+            if candidates and candidates[0].strip():
+                url_local_id = candidates[0].strip()
+                repository_parts = path_parts
+                break
+
+    if not repository_parts or not url_local_id:
+        raise ValueError(
+            "无法从云效 MR 地址解析仓库和 MR 编号；"
+            "请确认地址包含 /change/<编号>、/merge_requests/<编号> 等路径"
+        )
+
+    if local_id is not None and str(local_id).strip() != url_local_id:
+        raise ValueError("MR 地址中的编号与 --mr-id 不一致")
+
+    repository = "/".join(repository_parts)
+    return _normalize_yunxiao_repository_id(repository), url_local_id
 
 
 class CodeReviewAgent:
@@ -263,7 +336,7 @@ class CodeReviewAgent:
     async def review_yunxiao_mr(
         self,
         repository_id: str,
-        local_id: str,
+        local_id: str | None = None,
         organization_id: str = DEFAULT_ORG_ID,
         dimensions: list[str] | None = None,
         auto_comment: bool = True,
@@ -277,7 +350,10 @@ class CodeReviewAgent:
             dimensions: 审查维度，None 表示全部
             auto_comment: 是否自动在 MR 上添加评论
         """
-        normalized_repository_id = _normalize_yunxiao_repository_id(repository_id)
+        normalized_repository_id, resolved_local_id = parse_yunxiao_mr_reference(
+            repository_id,
+            local_id,
+        )
 
         comment_instruction = (
             "审查完成后，将所有问题合并为唯一一条中文评论发布到 MR（commentType=GLOBAL_COMMENT，只调用 1 次）。"
@@ -298,7 +374,7 @@ class CodeReviewAgent:
 本次任务 MR 信息:
 - organizationId: {organization_id}
 - repositoryId: {normalized_repository_id}
-- localId: {local_id}
+- localId: {resolved_local_id}
 
 {dimension_note}
 
@@ -311,6 +387,7 @@ class CodeReviewAgent:
         mcp_config = _get_yunxiao_mcp_config() if provider in OPENAI_PROVIDERS else {}
         options = RuntimeOptions(
             allowed_tools=list(YUNXIAO_MR_AGENT.tools),
+            enforce_mr_review=True,
             allowed_agents=self._dimension_agent_names(dimensions)
             or ["security-reviewer", "quality-reviewer", "performance-reviewer"],
             hooks=self.hooks,
@@ -319,6 +396,7 @@ class CodeReviewAgent:
             verbose=True,
             progress_prefix="yunxiao-mr",
             disallowed_tools=[
+                *([] if auto_comment else ['mcp__yunxiao__create_change_request_comment']),
                 "Bash",
                 "Read",
                 "Write",
@@ -335,7 +413,7 @@ class CodeReviewAgent:
         parsed["metadata"] = {
             "repository_id": normalized_repository_id,
             "original_repository_id": repository_id,
-            "local_id": local_id,
+            "local_id": resolved_local_id,
             "organization_id": organization_id,
             "auto_comment": auto_comment,
             "dimensions": dimensions or ["all"],

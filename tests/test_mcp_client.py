@@ -1,6 +1,7 @@
 """HTTP MCP client and OpenAI bridge tests."""
 from __future__ import annotations
 
+import threading
 from unittest.mock import Mock
 
 import pytest
@@ -119,6 +120,33 @@ def test_http_mcp_client_surfaces_json_rpc_errors():
 
     with pytest.raises(McpClientError, match="403 FORBIDDEN"):
         client.call_tool("get_change_request", {})
+
+
+def test_http_mcp_client_retries_transient_connection_error():
+    client = HttpMcpClient(server_label="yunxiao", server_url="https://example.test/mcp")
+    client._initialized = True  # noqa: SLF001
+    client._session.post = Mock(  # noqa: SLF001
+        side_effect=[
+            requests.ConnectionError("remote disconnected"),
+            _response({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}),
+        ]
+    )
+
+    assert client.call_tool("get_change_request", {}) == {"ok": True}
+    assert client._session.post.call_count == 2  # noqa: SLF001
+
+
+def test_http_mcp_client_does_not_retry_comment_writes():
+    client = HttpMcpClient(server_label="yunxiao", server_url="https://example.test/mcp")
+    client._initialized = True  # noqa: SLF001
+    client._session.post = Mock(  # noqa: SLF001
+        side_effect=requests.ConnectionError("remote disconnected")
+    )
+
+    with pytest.raises(requests.ConnectionError):
+        client.call_tool("create_change_request_comment", {})
+
+    assert client._session.post.call_count == 1  # noqa: SLF001
 
 
 def test_http_mcp_client_sse_skips_notifications_and_matches_request_id():
@@ -259,6 +287,48 @@ def test_legacy_sse_skips_notifications_and_matches_request_id():
     assert client.call_tool("ping", {}) == {"ok": True}
 
 
+def test_legacy_sse_retries_transient_message_connection(monkeypatch):
+    import src.agents.mcp_client as mcp_client
+
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _seconds: None)
+    client = SseMcpClient(
+        server_label="yunxiao",
+        server_url="https://example.test/sse",
+    )
+    client._initialized = True  # noqa: SLF001
+    client._messages_url = "https://example.test/messages"  # noqa: SLF001
+    client._session.post = Mock(  # noqa: SLF001
+        side_effect=[
+            requests.ConnectionError("remote disconnected"),
+            _response({}),
+        ]
+    )
+    client._events.put({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})  # noqa: SLF001
+
+    assert client.call_tool("get_change_request", {}) == {"ok": True}
+    assert client._session.post.call_count == 2  # noqa: SLF001
+
+
+def test_legacy_sse_does_not_retry_comment_writes(monkeypatch):
+    import src.agents.mcp_client as mcp_client
+
+    monkeypatch.setattr(mcp_client.time, "sleep", lambda _seconds: None)
+    client = SseMcpClient(
+        server_label="yunxiao",
+        server_url="https://example.test/sse",
+    )
+    client._initialized = True  # noqa: SLF001
+    client._messages_url = "https://example.test/messages"  # noqa: SLF001
+    client._session.post = Mock(  # noqa: SLF001
+        side_effect=requests.ConnectionError("remote disconnected")
+    )
+
+    with pytest.raises(requests.ConnectionError):
+        client.call_tool("create_change_request_comment", {})
+
+    assert client._session.post.call_count == 1  # noqa: SLF001
+
+
 def test_legacy_sse_timeout_is_structured_error():
     client = SseMcpClient(
         server_label="yunxiao",
@@ -343,6 +413,37 @@ def test_legacy_sse_close_releases_sessions_and_thread():
     stream_thread.join.assert_called_once()
     assert client._stream_thread is None  # noqa: SLF001
     assert client._messages_url is None  # noqa: SLF001
+
+
+def test_legacy_sse_close_interrupts_blocked_reader_without_waiting_for_response_close():
+    import socket
+    import time
+
+    reader, writer = socket.socketpair()
+    started = threading.Event()
+    response = Mock()
+    response.raw._connection.sock = reader
+    response.close.side_effect = lambda: time.sleep(10)
+
+    def consume() -> None:
+        started.set()
+        try:
+            reader.recv(1)
+        except OSError:
+            pass
+
+    client = SseMcpClient(server_label="yunxiao", server_url="https://example.test/sse")
+    client._stream_response = response  # noqa: SLF001
+    client._stream_thread = threading.Thread(target=consume, daemon=True)  # noqa: SLF001
+    client._stream_thread.start()  # noqa: SLF001
+    assert started.wait(timeout=1)
+
+    started_at = time.monotonic()
+    client._stop_stream()  # noqa: SLF001
+
+    assert time.monotonic() - started_at < 1.2
+    assert client._stream_thread is None  # noqa: SLF001
+    writer.close()
 
 
 def test_legacy_sse_reconnects_after_eof_and_close():

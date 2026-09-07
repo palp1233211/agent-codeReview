@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .mcp_client import HttpMcpClient, McpTool, SseMcpClient, create_http_mcp_clients
+from .review_guard import ReviewGuard
 
 ToolCallable = Callable[..., Any | Awaitable[Any]]
 
@@ -40,6 +42,7 @@ class RuntimeOptions:
     verbose: bool = False
     progress_prefix: str = "agent"
     disallowed_tools: list[str] = field(default_factory=list)
+    enforce_mr_review: bool = False
 
 
 @dataclass
@@ -63,6 +66,10 @@ class ToolDefinition:
 
 
 _TOOLS: dict[str, ToolDefinition] = {}
+
+_DEFAULT_MCP_CONTEXT_MAX_CHARS = 160_000
+_DEFAULT_MCP_RESULT_MAX_CHARS = 60_000
+_MCP_RESULT_TEXT_MARKER = "\n\n[内容已截断：请以 MR diff 为准，避免继续读取无关完整文件。]"
 
 
 def agent_tool(name: str, description: str, input_schema: dict[str, Any]):
@@ -134,6 +141,7 @@ def _summarize_tool_args(args: dict[str, Any]) -> str:
         "localId",
         "from",
         "to",
+        "straight",
         "filePath",
         "ref",
         "comment_type",
@@ -158,6 +166,200 @@ def _summarize_tool_result(result: Any) -> str:
             return f"text_len={len(str(text))}"
         return f"keys={sorted(result)[:8]}"
     return f"type={type(result).__name__}"
+
+
+def _mcp_context_limit() -> int:
+    value = os.getenv("YUNXIAO_MCP_CONTEXT_MAX_CHARS", "")
+    try:
+        return max(1, int(value)) if value else _DEFAULT_MCP_CONTEXT_MAX_CHARS
+    except ValueError:
+        return _DEFAULT_MCP_CONTEXT_MAX_CHARS
+
+
+def _mcp_result_limit() -> int:
+    value = os.getenv("YUNXIAO_MCP_RESULT_MAX_CHARS", "")
+    try:
+        return max(1, int(value)) if value else _DEFAULT_MCP_RESULT_MAX_CHARS
+    except ValueError:
+        return _DEFAULT_MCP_RESULT_MAX_CHARS
+
+
+def _serialized_chars(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _extract_compare_scope(result: Any) -> dict[str, Any] | None:
+    """Extract changed-file and added-line ranges from a Yunxiao compare result."""
+    if not isinstance(result, dict) or not isinstance(result.get("content"), list):
+        return None
+    text = "\n".join(
+        str(block.get("text", ""))
+        for block in result["content"]
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    )
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    diffs = payload.get("diffs") if isinstance(payload, dict) else None
+    if not isinstance(diffs, list):
+        return None
+
+    files: dict[str, dict[str, Any]] = {}
+    hunk_pattern = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+    for item in diffs:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("newPath") or item.get("oldPath") or "").strip()
+        if not path:
+            continue
+        added_lines: list[int] = []
+        diff_text = str(item.get("diff") or "")
+        new_line = None
+        for line in diff_text.splitlines():
+            match = hunk_pattern.match(line)
+            if match:
+                new_line = int(match.group(1))
+                continue
+            if new_line is None:
+                continue
+            if line.startswith("+") and not line.startswith("+++"):
+                added_lines.append(new_line)
+                new_line += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                continue
+            else:
+                new_line += 1
+        files[path] = {
+            "added_line_ranges": _as_line_ranges(added_lines),
+            "deleted": bool(item.get("deletedFile")),
+        }
+    return {"files": files} if files else None
+
+
+def _as_line_ranges(lines: list[int]) -> list[str]:
+    """Compress sorted line numbers into compact inclusive ranges."""
+    if not lines:
+        return []
+    values = sorted(set(lines))
+    ranges: list[str] = []
+    start = previous = values[0]
+    for value in values[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = value
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ranges
+
+
+def _attach_compare_scope(result: Any) -> Any:
+    scope = _extract_compare_scope(result)
+    if not scope or not isinstance(result, dict):
+        return result
+    enriched = dict(result)
+    enriched["review_scope"] = scope
+    return enriched
+
+
+def _mcp_scope_restriction(
+    tool_name: str,
+    args: dict[str, Any],
+    *,
+    changed_files: set[str] | None,
+    read_file_paths: set[str],
+    context_chars: int,
+    context_limit: int,
+) -> str | None:
+    """Keep file reads inside the MR scope before making a remote request."""
+    if not tool_name.endswith("__get_file_blobs"):
+        return None
+    file_path = str(args.get("filePath") or "").strip()
+    if changed_files is None:
+        return "尚未获得 MR diff，禁止读取完整文件；请先调用 compare。"
+    if file_path not in changed_files:
+        return f"文件 {file_path} 不在本次 MR diff 的变更文件集合中，禁止读取。"
+    if file_path in read_file_paths:
+        return f"文件 {file_path} 已读取过，禁止重复读取。"
+    if context_chars >= context_limit:
+        return "MCP 内容预算已用尽，禁止读取更多完整文件；请仅基于已有 MR diff 审查。"
+    read_file_paths.add(file_path)
+    return None
+
+
+def _mcp_scope_blocked_result(message: str) -> dict[str, Any]:
+    return {
+        "content": [{"type": "text", "text": message}],
+        "scope_blocked": True,
+    }
+
+
+def _compact_mcp_result(
+    tool_name: str,
+    result: Any,
+    *,
+    max_chars: int,
+) -> Any:
+    """Bound large MCP text results before they enter model conversation history."""
+    if tool_name.endswith('__create_change_request_comment') or _tool_error_message(result):
+        return result
+    if max_chars <= 0:
+        return {
+            "content": [{"type": "text", "text": "MCP 内容预算已用尽，停止读取更多完整文件；请仅基于已有 MR diff 审查。"}],
+            "truncated": True,
+            "tool": tool_name,
+            "original_chars": _serialized_chars(result),
+            "kept_chars": 0,
+        }
+    if _serialized_chars(result) <= max_chars:
+        return result
+    if not isinstance(result, dict):
+        text = json.dumps(result, ensure_ascii=False, default=str)
+        return {
+            "content": [{"type": "text", "text": text[:max_chars] + _MCP_RESULT_TEXT_MARKER}],
+            "truncated": True,
+            "tool": tool_name,
+        }
+
+    content = result.get("content")
+    if not isinstance(content, list):
+        text = json.dumps(result, ensure_ascii=False, default=str)
+        return {
+            "content": [{"type": "text", "text": text[:max_chars] + _MCP_RESULT_TEXT_MARKER}],
+            "truncated": True,
+            "tool": tool_name,
+        }
+
+    compacted = dict(result)
+    compacted_content = []
+    remaining = max_chars
+    original_chars = _serialized_chars(result)
+    was_truncated = False
+    for block in content:
+        if not isinstance(block, dict) or not isinstance(block.get("text"), str):
+            compacted_content.append(block)
+            continue
+        block_copy = dict(block)
+        text = block["text"]
+        if remaining <= 0:
+            block_copy["text"] = _MCP_RESULT_TEXT_MARKER.lstrip()
+            was_truncated = True
+        elif len(text) > remaining:
+            keep = max(0, remaining - len(_MCP_RESULT_TEXT_MARKER))
+            block_copy["text"] = text[:keep] + _MCP_RESULT_TEXT_MARKER
+            remaining = 0
+            was_truncated = True
+        else:
+            block_copy["text"] = text
+            remaining -= len(text)
+        compacted_content.append(block_copy)
+    compacted["content"] = compacted_content
+    if was_truncated:
+        compacted["truncated"] = True
+        compacted["original_chars"] = original_chars
+        compacted["kept_chars"] = _serialized_chars(compacted)
+    return compacted
 
 
 def _tool_operation_key(name: str, args: dict[str, Any]) -> str:
@@ -371,6 +573,13 @@ class OpenAIAgentRuntime:
 
         messages: list[dict[str, Any]] = []
         unresolved_tool_errors: dict[str, str] = {}
+        mcp_context_chars = 0
+        mcp_context_limit = _mcp_context_limit()
+        mcp_result_limit = _mcp_result_limit()
+        changed_files: set[str] | None = None
+        read_file_paths: set[str] = set()
+
+        review_guard = ReviewGuard() if options.enforce_mr_review else None
 
         for _ in range(options.max_turns):
             response = await asyncio.to_thread(
@@ -405,21 +614,52 @@ class OpenAIAgentRuntime:
                 elif item_type == "function_call":
                     tool_name = getattr(item, "name", "")
                     args = _loads_json(getattr(item, "arguments", "{}"))
+                    guard_error = review_guard.before(tool_name, args) if review_guard else None
                     _progress(options, f"调用工具: {tool_name} {_summarize_tool_args(args)}")
                     messages.append({"type": "tool_use", "tool": tool_name, "input": args})
-                    result = await self._call_tool(
+                    scope_restriction = _mcp_scope_restriction(
                         tool_name,
                         args,
-                        cwd=cwd,
-                        hooks=options.hooks,
-                        agents=options.agents,
-                        max_turns=options.max_turns,
-                        verbose=options.verbose,
-                        progress_prefix=options.progress_prefix,
-                        mcp_tools=mcp_tools,
-                        allowed_tools=options.allowed_tools,
-                        disallowed_tools=options.disallowed_tools,
+                        changed_files=changed_files,
+                        read_file_paths=read_file_paths,
+                        context_chars=mcp_context_chars,
+                        context_limit=mcp_context_limit,
                     )
+                    if guard_error:
+                        result = {"error": guard_error}
+                    elif scope_restriction:
+                        result = _mcp_scope_blocked_result(scope_restriction)
+                    else:
+                        result = await self._call_tool(
+                            tool_name,
+                            args,
+                            cwd=cwd,
+                            hooks=options.hooks,
+                            agents=options.agents,
+                            max_turns=options.max_turns,
+                            verbose=options.verbose,
+                            progress_prefix=options.progress_prefix,
+                            mcp_tools=mcp_tools,
+                            allowed_tools=options.allowed_tools,
+                            disallowed_tools=options.disallowed_tools,
+                        )
+                    if tool_name.endswith("__compare"):
+                        if review_guard:
+                            review_guard.capture(result)
+                        result = _attach_compare_scope(result)
+                        scope = _extract_compare_scope(result)
+                        if scope:
+                            changed_files = set(scope["files"])
+                    result = _compact_mcp_result(
+                        tool_name,
+                        result,
+                        max_chars=min(
+                            mcp_result_limit,
+                            mcp_context_limit - mcp_context_chars,
+                        ),
+                    ) if tool_name.startswith("mcp__") else result
+                    if tool_name.startswith("mcp__"):
+                        mcp_context_chars += _serialized_chars(result)
                     operation_key = _tool_operation_key(tool_name, args)
                     tool_error = _tool_error_message(result)
                     if tool_error:
@@ -442,6 +682,12 @@ class OpenAIAgentRuntime:
             if not tool_outputs:
                 _progress(options, "OpenAI Responses 完成，未等待更多工具结果")
                 final_text = _response_text(response)
+                if review_guard and (error := review_guard.validate(final_text)):
+                    if review_guard.valid_comment:
+                        messages.append({"type": "assistant", "content": [review_guard.valid_comment]})
+                        return [{"type": "result", "subtype": "success", "content": review_guard.valid_comment}]
+                    return [{"type": "result", "subtype": "review_scope_error", "is_error": True,
+                             "content": '审查报告未通过变更范围校验，未输出该报告。' + error}]
                 if unresolved_tool_errors:
                     messages.append(
                         {
@@ -546,6 +792,12 @@ class OpenAIAgentRuntime:
 
         messages: list[dict[str, Any]] = []
         unresolved_tool_errors: dict[str, str] = {}
+        mcp_context_chars = 0
+        mcp_context_limit = _mcp_context_limit()
+        mcp_result_limit = _mcp_result_limit()
+        changed_files: set[str] | None = None
+        read_file_paths: set[str] = set()
+        review_guard = ReviewGuard() if options.enforce_mr_review else None
         for _ in range(options.max_turns):
             response = await asyncio.to_thread(
                 self.client.chat.completions.create,
@@ -560,6 +812,12 @@ class OpenAIAgentRuntime:
 
             tool_calls = choice.tool_calls or []
             if not tool_calls:
+                if review_guard and (error := review_guard.validate(content)):
+                    if review_guard.valid_comment:
+                        messages.append({"type": "assistant", "content": [review_guard.valid_comment]})
+                        return [{"type": "result", "subtype": "success", "content": review_guard.valid_comment}]
+                    return [{"type": "result", "subtype": "review_scope_error", "is_error": True,
+                             "content": '审查报告未通过变更范围校验，未输出该报告。' + error}]
                 _progress(options, "OpenAI Chat Completions 完成，未等待更多工具结果")
                 if unresolved_tool_errors:
                     messages.append(
@@ -588,21 +846,52 @@ class OpenAIAgentRuntime:
             for call in tool_calls:
                 tool_name = call.function.name
                 args = _loads_json(call.function.arguments)
+                guard_error = review_guard.before(tool_name, args) if review_guard else None
                 _progress(options, f"调用工具: {tool_name} {_summarize_tool_args(args)}")
                 messages.append({"type": "tool_use", "tool": tool_name, "input": args})
-                result = await self._call_tool(
+                scope_restriction = _mcp_scope_restriction(
                     tool_name,
                     args,
-                    cwd=cwd,
-                    hooks=options.hooks,
-                    agents=options.agents,
-                    max_turns=options.max_turns,
-                    verbose=options.verbose,
-                    progress_prefix=options.progress_prefix,
-                    mcp_tools=mcp_tools,
-                    allowed_tools=options.allowed_tools,
-                    disallowed_tools=options.disallowed_tools,
+                    changed_files=changed_files,
+                    read_file_paths=read_file_paths,
+                    context_chars=mcp_context_chars,
+                    context_limit=mcp_context_limit,
                 )
+                if guard_error:
+                    result = {"error": guard_error}
+                elif scope_restriction:
+                    result = _mcp_scope_blocked_result(scope_restriction)
+                else:
+                    result = await self._call_tool(
+                        tool_name,
+                        args,
+                        cwd=cwd,
+                        hooks=options.hooks,
+                        agents=options.agents,
+                        max_turns=options.max_turns,
+                        verbose=options.verbose,
+                        progress_prefix=options.progress_prefix,
+                        mcp_tools=mcp_tools,
+                        allowed_tools=options.allowed_tools,
+                        disallowed_tools=options.disallowed_tools,
+                    )
+                if tool_name.endswith("__compare"):
+                    if review_guard:
+                        review_guard.capture(result)
+                    result = _attach_compare_scope(result)
+                    scope = _extract_compare_scope(result)
+                    if scope:
+                        changed_files = set(scope["files"])
+                result = _compact_mcp_result(
+                    tool_name,
+                    result,
+                    max_chars=min(
+                        mcp_result_limit,
+                        mcp_context_limit - mcp_context_chars,
+                    ),
+                ) if tool_name.startswith("mcp__") else result
+                if tool_name.startswith("mcp__"):
+                    mcp_context_chars += _serialized_chars(result)
                 operation_key = _tool_operation_key(tool_name, args)
                 tool_error = _tool_error_message(result)
                 if tool_error:

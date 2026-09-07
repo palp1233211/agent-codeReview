@@ -19,8 +19,8 @@ def test_init_creates_table_if_not_exists(mock_connect):
 
     ConversationStore(host="127.0.0.1", port=3306, user="u", password="p", database="db")
 
-    executed_sql = cursor.execute.call_args[0][0]
-    assert "CREATE TABLE IF NOT EXISTS lark_bot_conversations" in executed_sql
+    executed_sql = [call.args[0] for call in cursor.execute.call_args_list]
+    assert any("CREATE TABLE IF NOT EXISTS lark_bot_conversations" in sql for sql in executed_sql)
 
 
 @patch("src.storage.conversation_store.pymysql.connect")
@@ -33,6 +33,7 @@ def test_log_inserts_row_with_expected_params(mock_connect):
 
     store.log(
         user_id="ou_1",
+        user_name="张三",
         chat_id="oc_1",
         message_id="om_1",
         conversation_id="conv-1",
@@ -42,4 +43,4 @@ def test_log_inserts_row_with_expected_params(mock_connect):
 
     executed_sql, params = cursor.execute.call_args[0]
     assert "INSERT IGNORE INTO lark_bot_conversations" in executed_sql
-    assert params == ("ou_1", "oc_1", "om_1", "conv-1", "你好", "你好呀")
+    assert params == ("ou_1", "张三", "oc_1", "om_1", "conv-1", "你好", "你好呀")

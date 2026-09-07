@@ -89,6 +89,63 @@ def test_main_propagates_review_exit_code(monkeypatch):
     assert exc.value.code == 1
 
 
+def test_main_accepts_yunxiao_mr_url_without_mr_id(monkeypatch):
+    captured = {}
+
+    async def fake_command(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli_main, "cmd_yunxiao_mr", fake_command)
+    monkeypatch.setattr(cli_main, "_check_env", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "cli.py",
+            "yunxiao-mr",
+            "-r",
+            "https://code.aliyun.com/org/project/change/123",
+            "--no-comment",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli_main.main()
+
+    assert exc.value.code == 0
+    assert captured["repository_id"] == "https://code.aliyun.com/org/project/change/123"
+    assert captured["local_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_yunxiao_command_resolves_mr_url_before_agent_call(monkeypatch):
+    captured = {}
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def review_yunxiao_mr(self, **kwargs):
+            captured.update(kwargs)
+            return {"is_error": False, "tools_used": []}
+
+    monkeypatch.setattr(reviewer, "CodeReviewAgent", FakeAgent)
+
+    code = await cli_main.cmd_yunxiao_mr(
+        "https://code.aliyun.com/org/project/change/123",
+        None,
+        "org-id",
+        None,
+        False,
+        "default",
+    )
+
+    assert code == 0
+    assert captured["repository_id"] == "org%2Fproject"
+    assert captured["local_id"] == "123"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("command_name", ["files", "diff"])
 async def test_local_review_commands_return_error_code(monkeypatch, capsys, command_name: str):

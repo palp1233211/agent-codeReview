@@ -59,17 +59,26 @@ def _check_env(command: str | None = None):
 
 async def cmd_yunxiao_mr(
     repository_id: str,
-    local_id: str,
+    local_id: str | None,
     organization_id: str,
     dimensions: list[str] | None,
     auto_comment: bool,
     business_type: str,
 ) -> int:
     """审查云效 MR，直接调用 CodeReviewAgent"""
-    from src.agents.reviewer import CodeReviewAgent, _normalize_yunxiao_repository_id
+    from src.agents.reviewer import CodeReviewAgent, parse_yunxiao_mr_reference
 
-    print(f"\n🚀 开始审查 MR #{local_id}（仓库: {repository_id}）")
-    print(f"   MCP仓库参数: {_normalize_yunxiao_repository_id(repository_id)}")
+    try:
+        resolved_repository_id, resolved_local_id = parse_yunxiao_mr_reference(
+            repository_id,
+            local_id,
+        )
+    except ValueError as exc:
+        print(f"❌ MR 参数错误: {exc}")
+        return 2
+
+    print(f"\n🚀 开始审查 MR #{resolved_local_id}（仓库: {repository_id}）")
+    print(f"   MCP仓库参数: {resolved_repository_id}")
     print(f"   业务类型: {business_type}")
     print(f"   维度: {dimensions or 'all'}")
     print(f"   自动评论: {auto_comment}")
@@ -82,8 +91,8 @@ async def cmd_yunxiao_mr(
         dim_values = dimensions
 
     result = await agent.review_yunxiao_mr(
-        repository_id=repository_id,
-        local_id=local_id,
+        repository_id=resolved_repository_id,
+        local_id=resolved_local_id,
         organization_id=organization_id,
         dimensions=dim_values,
         auto_comment=auto_comment,
@@ -253,6 +262,9 @@ def main():
   # 审查云效 MR（自动发中文评论）
   python cli.py yunxiao-mr -r 3865544 -m 968
 
+  # 直接传云效 MR 地址（可省略 -m）
+  python cli.py yunxiao-mr -r 'https://code.aliyun.com/<org>/<repo>/change/968'
+
   # 不发评论，只看报告
   python cli.py yunxiao-mr -r 3865544 -m 968 --no-comment
 
@@ -292,7 +304,7 @@ def main():
     # yunxiao-mr
     p = subparsers.add_parser("yunxiao-mr", help="审查云效 MR")
     p.add_argument("-r", "--repository", required=True, help="仓库数字ID、完整路径或 MR URL")
-    p.add_argument("-m", "--mr-id", required=True, help="MR编号")
+    p.add_argument("-m", "--mr-id", default=None, help="MR编号；传入 MR URL 时可省略")
     p.add_argument("-o", "--organization", default=None, help="组织ID（默认读取 YUNXIAO_ORG_ID 环境变量）")
     p.add_argument("-d", "--dimensions", nargs="+",
                    choices=["security", "quality", "performance", "all"],

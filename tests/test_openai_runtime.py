@@ -1,12 +1,20 @@
 """Behavior tests for OpenAI Responses and Chat Completions agent loops."""
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from src.agents.runtime import OpenAIAgentRuntime, RuntimeOptions, agent_tool
+from src.agents.runtime import (
+    OpenAIAgentRuntime,
+    RuntimeOptions,
+    _extract_compare_scope,
+    _compact_mcp_result,
+    _mcp_scope_restriction,
+    agent_tool,
+)
 
 
 @agent_tool(
@@ -25,6 +33,40 @@ async def _test_echo(value: str) -> dict[str, str]:
 )
 async def _test_boom() -> None:
     raise RuntimeError("boom")
+
+
+def test_compact_mcp_result_marks_large_text():
+    result = {"content": [{"type": "text", "text": "x" * 1000}]}
+
+    compacted = _compact_mcp_result("mcp__yunxiao__get_file_blobs", result, max_chars=100)
+
+    assert compacted["truncated"] is True
+    assert compacted["original_chars"] > compacted["kept_chars"]
+    assert "内容已截断" in compacted["content"][0]["text"]
+
+
+def test_extract_compare_scope_indexes_added_lines():
+    result = {
+        "content": [{
+            "type": "text",
+            "text": '{"diffs":[{"newPath":"app/example.php","diff":"--- a/app/example.php\\n+++ b/app/example.php\\n@@ -10,2 +10,3 @@\\n old\\n+new_a\\n+new_b\\n"}]}',
+        }]
+    }
+
+    assert _extract_compare_scope(result) == {
+        "files": {"app/example.php": {"added_line_ranges": ["11-12"], "deleted": False}}
+    }
+
+
+def test_mcp_scope_blocks_unmodified_file_reads():
+    assert _mcp_scope_restriction(
+        "mcp__yunxiao__get_file_blobs",
+        {"filePath": "app/old.php"},
+        changed_files={"app/changed.php"},
+        read_file_paths=set(),
+        context_chars=0,
+        context_limit=80000,
+    ) == "文件 app/old.php 不在本次 MR diff 的变更文件集合中，禁止读取。"
 
 
 class _ResponseItem(SimpleNamespace):
@@ -50,6 +92,49 @@ class _ChatMessage(SimpleNamespace):
                 for call in self.tool_calls
             ]
         return payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['responses', 'chat_completions'])
+async def test_mr_guard_blocks_historical_comment_and_final_report(mode):
+    invalid = ('## 🤖 AI 代码审查报告\n#### 1. [问题] `history.php:11`\n'
+               '- 变更证据：new `new`\n### 📊 审查结论\nHigh 1')
+    calls = [
+        ('mcp__yunxiao__compare', {'straight': 'true'}),
+        ('mcp__yunxiao__create_change_request_comment', {'content': invalid}),
+    ]
+    if mode == 'responses':
+        outputs = []
+        for i, (name, args) in enumerate(calls):
+            payload = dict(type='function_call', call_id=str(i), name=name,
+                           arguments=json.dumps(args))
+            outputs.append(SimpleNamespace(output=[_ResponseItem(**payload, serialized=payload)], output_text=''))
+        outputs.append(SimpleNamespace(output=[], output_text=invalid))
+        create = Mock(side_effect=outputs)
+        client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    else:
+        outputs = []
+        for i, (name, args) in enumerate(calls):
+            call = SimpleNamespace(id=str(i), function=SimpleNamespace(name=name, arguments=json.dumps(args)))
+            outputs.append(SimpleNamespace(choices=[SimpleNamespace(message=_ChatMessage(content=None, tool_calls=[call]))]))
+        outputs.append(SimpleNamespace(choices=[SimpleNamespace(message=_ChatMessage(content=invalid, tool_calls=[]))]))
+        create = Mock(side_effect=outputs)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    runtime = OpenAIAgentRuntime(model='test-model')
+    runtime.api_mode = mode
+    runtime._client = client
+    runtime._load_mcp_tools = AsyncMock(return_value={})
+    runtime._call_tool = AsyncMock(return_value={'content': [{'type': 'text', 'text': json.dumps({
+        'diffs': [{'newPath': 'a.php', 'diff': '@@ -10,2 +10,2 @@\n unchanged\n-old\n+new'}]
+    })}]})
+    messages = await runtime.run('review', RuntimeOptions(
+        allowed_tools=[name for name, _ in calls], max_turns=3, enforce_mr_review=True,
+    ))
+    assert runtime._call_tool.await_count == 1
+    assert runtime._call_tool.call_args.args[1]['straight'] == 'false'
+    assert messages[-1]['subtype'] == 'review_scope_error'
+    assert messages[-1]['is_error'] is True
+    assert invalid not in str(messages)
 
 
 def _function_call(call_id: str, value: str) -> _ResponseItem:

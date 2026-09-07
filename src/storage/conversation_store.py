@@ -9,6 +9,7 @@ _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS lark_bot_conversations (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     user_id VARCHAR(64) NOT NULL COMMENT '飞书发送者 open_id',
+    user_name VARCHAR(255) NOT NULL DEFAULT '' COMMENT '飞书用户姓名',
     chat_id VARCHAR(64) NOT NULL COMMENT '飞书会话 chat_id',
     message_id VARCHAR(64) NOT NULL COMMENT '飞书消息 message_id，用于去重',
     conversation_id VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'Dify conversation_id',
@@ -24,8 +25,8 @@ CREATE TABLE IF NOT EXISTS lark_bot_conversations (
 
 _INSERT_SQL = """
 INSERT IGNORE INTO lark_bot_conversations
-    (user_id, chat_id, message_id, conversation_id, question, answer)
-VALUES (%s, %s, %s, %s, %s, %s)
+    (user_id, user_name, chat_id, message_id, conversation_id, question, answer)
+VALUES (%s, %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -67,11 +68,22 @@ class ConversationStore:
     def _ensure_table(self) -> None:
         with self._connect() as conn, conn.cursor() as cursor:
             cursor.execute(_CREATE_TABLE_SQL)
+            cursor.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_schema=%s AND table_name=%s AND column_name=%s",
+                (self._connect_kwargs["database"], "lark_bot_conversations", "user_name"),
+            )
+            if cursor.fetchone()[0] == 0:
+                cursor.execute(
+                    "ALTER TABLE lark_bot_conversations ADD COLUMN "
+                    "user_name VARCHAR(255) NOT NULL DEFAULT '' COMMENT '飞书用户姓名' AFTER user_id"
+                )
 
     def log(
         self,
         *,
         user_id: str,
+        user_name: str = "",
         chat_id: str,
         message_id: str,
         conversation_id: str,
@@ -82,5 +94,5 @@ class ConversationStore:
         with self._connect() as conn, conn.cursor() as cursor:
             cursor.execute(
                 _INSERT_SQL,
-                (user_id, chat_id, message_id, conversation_id, question, answer),
+                (user_id, user_name, chat_id, message_id, conversation_id, question, answer),
             )

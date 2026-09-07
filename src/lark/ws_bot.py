@@ -21,6 +21,9 @@ from .client import LarkClient
 
 logger = logging.getLogger(__name__)
 
+_user_name_cache: dict[str, str] = {}
+_user_name_cache_lock = threading.Lock()
+
 
 class FilteringEventDispatcherHandler:
     """只把白名单事件交给 SDK dispatcher，其他事件静默确认。"""
@@ -85,6 +88,20 @@ def _bot_is_mentioned(mentions: list | None, bot_open_id: str | None) -> bool:
     return False
 
 
+def _get_cached_user_name(lark_client: LarkClient, user_id: str) -> str:
+    with _user_name_cache_lock:
+        if user_id in _user_name_cache:
+            return _user_name_cache[user_id]
+    try:
+        user_name = lark_client.get_user_name(user_id)
+    except (requests.RequestException, RuntimeError):
+        logger.exception("获取飞书用户姓名失败: user_id=%s", user_id)
+        return ""
+    with _user_name_cache_lock:
+        _user_name_cache[user_id] = user_name
+    return user_name
+
+
 class _RecentMessageIds:
     """线程安全的最近处理过 message_id 缓存。
 
@@ -121,6 +138,7 @@ def _reply_via_dify(
     chat_id: str,
     message_id: str,
     text: str,
+    user_name: str = "",
 ) -> None:
     """调用 Dify 拿 answer、回传飞书、记录这轮问答；跑在独立线程里，不阻塞事件回调。"""
     try:
@@ -146,6 +164,7 @@ def _reply_via_dify(
     try:
         conversation_store.log(
             user_id=user_id,
+            user_name=user_name,
             chat_id=chat_id,
             message_id=message_id,
             conversation_id=reply.conversation_id,
@@ -166,6 +185,7 @@ def _process_message(
     chat_id: str,
     message_id: str,
     text: str,
+    user_name: str = "",
 ) -> None:
     """先看是不是 /kb 指令，不是才转发 Dify。跑在独立线程里。
 
@@ -189,6 +209,7 @@ def _process_message(
         chat_id,
         message_id,
         text,
+        user_name,
     )
 
 
@@ -254,6 +275,7 @@ def build_message_receive_handler(
                 message.chat_id,
                 message.message_id,
                 text,
+                _get_cached_user_name(lark_client, user_id),
             ),
             daemon=True,
         ).start()

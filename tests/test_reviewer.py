@@ -7,6 +7,49 @@ from src.agents import reviewer
 from src.hooks import get_hooks_config
 
 
+@pytest.mark.parametrize(
+    ("reference", "local_id", "expected_repository", "expected_local_id"),
+    [
+        (
+            "https://code.aliyun.com/org/project/change/123",
+            None,
+            "org%2Fproject",
+            "123",
+        ),
+        (
+            "https://code.aliyun.com/org/project/merge_requests/456?foo=bar",
+            None,
+            "org%2Fproject",
+            "456",
+        ),
+        ("2835387", "42", "2835387", "42"),
+    ],
+)
+def test_parse_yunxiao_mr_reference(
+    reference,
+    local_id,
+    expected_repository,
+    expected_local_id,
+):
+    assert reviewer.parse_yunxiao_mr_reference(reference, local_id) == (
+        expected_repository,
+        expected_local_id,
+    )
+
+
+def test_parse_yunxiao_mr_reference_rejects_missing_local_id():
+    with pytest.raises(ValueError, match="必须同时提供 MR 编号"):
+        reviewer.parse_yunxiao_mr_reference("2835387")
+
+
+def test_parse_yunxiao_mr_reference_rejects_mismatched_ids():
+    with pytest.raises(ValueError, match="不一致"):
+        reviewer.parse_yunxiao_mr_reference(
+            "https://code.aliyun.com/org/project/change/123",
+            "456",
+        )
+
+
 def test_hooks_config():
     config = get_hooks_config()
 

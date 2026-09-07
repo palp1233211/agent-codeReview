@@ -111,6 +111,19 @@ class LarkClient:
             raise RuntimeError(f"get_bot_open_id failed [{data.get('code')}]: {data.get('msg')}")
         return data["bot"]["open_id"]
 
+    def get_user_name(self, open_id: str) -> str:
+        """按发送者 open_id 获取飞书用户姓名。"""
+        resp = requests.get(
+            f"{FEISHU_API}/contact/v3/users/{urllib.parse.quote(open_id, safe='')}",
+            headers=self._headers(),
+            params={"user_id_type": "open_id"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"get_user_name failed [{data.get('code')}]: {data.get('msg')}")
+        return data.get("data", {}).get("user", {}).get("name", "")
+
     def send_text_message(self, chat_id: str, text: str) -> None:
         req = (
             CreateMessageRequest.builder()

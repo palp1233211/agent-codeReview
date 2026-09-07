@@ -5,7 +5,9 @@ import itertools
 import json
 import math
 import queue
+import socket
 import threading
+import time
 from urllib.parse import urljoin
 from dataclasses import dataclass
 from typing import Any
@@ -46,10 +48,12 @@ class HttpMcpClient:
         server_url: str,
         headers: dict[str, str] | None = None,
         timeout: float = 30.0,
+        max_retries: int = 2,
     ) -> None:
         self.server_label = server_label
         self.server_url = server_url
         self.timeout = timeout
+        self.max_retries = max(0, max_retries)
         self._session = requests.Session()
         self._session.headers.update(headers or {})
         self._session.headers.update(
@@ -104,18 +108,29 @@ class HttpMcpClient:
             "method": method,
             "params": params,
         }
-        response = self._session.post(
-            self.server_url,
-            json=payload,
-            timeout=self.timeout,
-            stream=True,
-        )
-        try:
-            self._capture_session_id(response)
-            response.raise_for_status()
-            data = self._decode_response(response, payload["id"])
-        finally:
-            response.close()
+        attempts = self.max_retries + 1 if self._is_retryable(method, params) else 1
+        for attempt in range(attempts):
+            response = None
+            try:
+                response = self._session.post(
+                    self.server_url,
+                    json=payload,
+                    timeout=self.timeout,
+                    stream=True,
+                )
+                self._capture_session_id(response)
+                response.raise_for_status()
+                data = self._decode_response(response, payload["id"])
+                break
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt >= attempts - 1:
+                    raise
+                time.sleep(min(2.0, 0.5 * (2**attempt)))
+            finally:
+                if response is not None:
+                    response.close()
+        else:  # pragma: no cover - the loop either breaks or raises
+            raise McpClientError(f"MCP {self.server_label} {method} 请求失败")
         error = data.get("error")
         if error:
             raise McpClientError(
@@ -124,6 +139,13 @@ class HttpMcpClient:
             )
         result = data.get("result", {})
         return result if isinstance(result, dict) else {"content": result}
+
+    @staticmethod
+    def _is_retryable(method: str, params: dict[str, Any]) -> bool:
+        """Retry reads, but never retry a potentially duplicate comment write."""
+        if method != "tools/call":
+            return True
+        return params.get("name") != "create_change_request_comment"
 
     def _notify(self, method: str) -> None:
         payload = {"jsonrpc": "2.0", "method": method}
@@ -190,10 +212,12 @@ class SseMcpClient:
         server_url: str,
         headers: dict[str, str] | None = None,
         timeout: float = 30.0,
+        max_retries: int = 2,
     ) -> None:
         self.server_label = server_label
         self.server_url = server_url
         self.timeout = timeout
+        self.max_retries = max(0, max_retries)
         self._session = requests.Session()
         self._session.headers.update(headers or {})
         self._stream_session = requests.Session()
@@ -313,29 +337,49 @@ class SseMcpClient:
             if not self._messages_url:
                 raise McpClientError(f"MCP {self.server_label} SSE 消息端点不可用")
             request_id = next(self._request_ids)
-            response = self._session.post(
-                self._messages_url,
-                json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            while True:
+            attempts = self.max_retries + 1 if self._is_retryable(method, params) else 1
+            for attempt in range(attempts):
+                response = None
                 try:
-                    event = self._events.get(timeout=self.timeout)
-                except queue.Empty as exc:
-                    raise McpClientError(f"MCP {self.server_label} {method} 超时") from exc
-                if isinstance(event, BaseException):
-                    raise McpClientError(f"MCP {self.server_label} SSE 连接断开: {event}") from event
-                if not _jsonrpc_id_matches(event.get("id"), request_id):
-                    continue
-                if event.get("error"):
-                    error = event["error"]
-                    raise McpClientError(
-                        f"MCP {self.server_label} {method} 失败: "
-                        f"{error.get('message') or json.dumps(error, ensure_ascii=False)}"
+                    response = self._session.post(
+                        self._messages_url,
+                        json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
+                        timeout=self.timeout,
                     )
-                result = event.get("result", {})
-                return result if isinstance(result, dict) else {"content": result}
+                    response.raise_for_status()
+                    while True:
+                        try:
+                            event = self._events.get(timeout=self.timeout)
+                        except queue.Empty as exc:
+                            raise McpClientError(f"MCP {self.server_label} {method} 超时") from exc
+                        if isinstance(event, BaseException):
+                            raise McpClientError(f"MCP {self.server_label} SSE 连接断开: {event}") from event
+                        if not _jsonrpc_id_matches(event.get("id"), request_id):
+                            continue
+                        if event.get("error"):
+                            error = event["error"]
+                            raise McpClientError(
+                                f"MCP {self.server_label} {method} 失败: "
+                                f"{error.get('message') or json.dumps(error, ensure_ascii=False)}"
+                            )
+                        result = event.get("result", {})
+                        return result if isinstance(result, dict) else {"content": result}
+                except (requests.ConnectionError, requests.Timeout):
+                    if attempt >= attempts - 1:
+                        raise
+                    time.sleep(min(2.0, 0.5 * (2**attempt)))
+                finally:
+                    if response is not None:
+                        response.close()
+
+            raise McpClientError(f"MCP {self.server_label} {method} 请求失败")  # pragma: no cover
+
+    @staticmethod
+    def _is_retryable(method: str, params: dict[str, Any]) -> bool:
+        """Retry reads, but never retry a potentially duplicate comment write."""
+        if method != "tools/call":
+            return True
+        return params.get("name") != "create_change_request_comment"
 
     def _notify(self, method: str) -> None:
         if not self._messages_url:
@@ -349,8 +393,15 @@ class SseMcpClient:
 
     def _stop_stream(self) -> None:
         self._stop_event.set()
-        if self._stream_response is not None:
-            self._stream_response.close()
+        response = self._stream_response
+        if response is not None:
+            # requests may be blocked indefinitely in ``iter_lines`` because
+            # legacy SSE has no read timeout.  Calling Response.close() in the
+            # caller thread can block on the same read, leaving the whole CLI
+            # stuck after a successful model response.  Break the socket first
+            # and keep Response.close() bounded in a daemon helper.
+            self._interrupt_stream_socket(response)
+            self._close_response_in_background(response)
         thread = self._stream_thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=min(self.timeout, 1.0))
@@ -359,6 +410,35 @@ class SseMcpClient:
         self._stream_thread = None
         self._stream_response = None
         self._messages_url = None
+
+    @staticmethod
+    def _interrupt_stream_socket(response: requests.Response) -> None:
+        """Wake a requests SSE reader without waiting for Response.close()."""
+        raw = getattr(response, "raw", None)
+        candidates = (
+            getattr(getattr(raw, "_connection", None), "sock", None),
+            getattr(getattr(getattr(raw, "_fp", None), "fp", None), "raw", None),
+        )
+        for candidate in candidates:
+            sock = getattr(candidate, "_sock", candidate)
+            if not isinstance(sock, socket.socket):
+                continue
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+            return
+
+    @staticmethod
+    def _close_response_in_background(response: requests.Response) -> None:
+        """Do not let a stuck urllib3 response block MCP client shutdown."""
+        closer = threading.Thread(target=response.close, daemon=True)
+        closer.start()
+        closer.join(timeout=0.1)
 
     def close(self) -> None:
         self._stop_stream()

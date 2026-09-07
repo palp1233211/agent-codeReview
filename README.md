@@ -73,39 +73,47 @@ pip install -r requirements.txt
 # 审查云效 MR
 python cli.py yunxiao-mr -r 3865544 -m 968 --business default
 
+# 直接使用云效 MR 地址（可省略 -m）
+python cli.py yunxiao-mr \
+  -r 'https://code.aliyun.com/<org>/<repo>/change/968' \
+  --business default
+
 # 本地文件审查
 python cli.py files src/agents/reviewer.py -d security quality
 ```
 
 ## 服务器部署
 
-服务器上 `venv/` 目录不存在是正常的（被 `.gitignore` 排除）。按以下步骤部署：
+生产环境推荐使用 Docker 的 OpenAI runtime：它包含云效 MCP 审查、飞书 Bot、Dify 和 MySQL 功能，但不安装 Claude SDK、Claude CLI 或 Node.js。服务器宿主机不需要安装 Python 或执行 `pip install`。
 
 ```bash
-# 1. 克隆代码
-git clone <repo_url>
-cd my-agent
-
-# 2. 本机部署：创建虚拟环境并安装依赖
-python3 -m venv venv
-source venv/bin/activate  # Linux/macOS
-pip install -r requirements.txt
-
-# 3. 配置环境变量
+# 1. 拉取代码并配置运行时变量（.env 不进入镜像）
+git clone <repo_url> /opt/my-agent
+cd /opt/my-agent
 cp .env.example .env
-vim .env  # 配置 API Key、云效 Token 等
+vim .env
 
-# 4. CLI 直接运行
-python cli.py yunxiao-mr -r 3865544 -m 968 --business default
+# 2. 构建完整 OpenAI 应用镜像
+docker build --target openai-runtime -t my-agent:openai .
 
-# 5. 可选：启动飞书长连接 Bot
-python cli.py lark-bot
+# 3. 一个常驻容器：飞书 Bot 作为主进程；Code Review 通过 docker exec 执行
+docker run -d \
+  --name my-agent \
+  --restart unless-stopped \
+  --env-file /opt/my-agent/.env \
+  -v /opt/my-agent:/app \
+  my-agent:openai \
+  python cli.py lark-bot
+
+# 4. 查看服务状态和日志
+docker ps --filter name=my-agent
+docker logs --tail 100 -f my-agent
 ```
 
 ### Docker 镜像选择
 
 ```bash
-# OpenAI-only：不安装 Node、Claude CLI 或 npm 云效 MCP server
+# 完整应用功能 + OpenAI：不安装 Node、Claude CLI 或 Claude SDK
 docker build --target openai-runtime -t my-agent:openai .
 
 # 完整镜像：保留 Claude provider 和 Claude stdio Yunxiao MCP 能力
@@ -115,11 +123,54 @@ docker build --target full-runtime -t my-agent:full .
 docker build -t my-agent:full .
 ```
 
-OpenAI 模式通过 Python 直接连接 HTTP/SSE Yunxiao MCP，因此 OpenAI-only 镜像不需要 Node.js 和 Claude CLI。Claude 模式仍需要完整镜像里的 Node 22、`@anthropic-ai/claude-code` 和 `alibabacloud-devops-mcp-server`。
+OpenAI 模式通过 Python 直接连接 HTTP/SSE Yunxiao MCP，因此 OpenAI runtime 不需要 Node.js 和 Claude CLI；它仍保留飞书、Dify、MySQL、知识库和本地审查功能。Claude 模式仍需要完整镜像里的 Node 22、`@anthropic-ai/claude-code` 和 `alibabacloud-devops-mcp-server`。
 
-**生产环境建议**：
-- 使用 systemd 或 supervisor 管理 `python cli.py lark-bot` 等长驻进程
-- 日志输出到 `/var/log/my-agent/` 目录
+### 服务器更新与生效流程
+
+生产环境默认将宿主机项目目录挂载到容器 `/app`。这样镜像只提供 Python 和依赖，代码、提示词及 `.env` 由 `/opt/my-agent` 直接提供。
+
+| 变更类型 | 操作 | 是否重新构建镜像 | 是否重启容器 |
+|---|---|---:|---:|
+| 只执行一次云效 MR 审查 | `docker exec my-agent python cli.py yunxiao-mr ...` | 否 | 否 |
+| 修改 Python、提示词或 `/opt/my-agent/.env` | 后续 `docker exec` 自动读取新文件；飞书 Bot 执行 `docker restart my-agent` 重新加载 | 否 | 是 |
+| 修改 `requirements-openai.txt`、`Dockerfile` 或系统依赖 | 重新 `docker build`，再删除并重新创建容器 | 是 | 是 |
+
+修改 Python、提示词或 `.env` 后：
+
+```bash
+cd /opt/my-agent
+
+# 下一次 docker exec 审查会直接使用挂载目录中的新代码和 .env。
+# 飞书 Bot 是已启动的 Python 进程，需要重启以加载新代码/配置。
+docker restart my-agent
+docker logs --tail 100 -f my-agent
+```
+
+修改 `requirements-openai.txt`、Dockerfile 或系统依赖后：
+
+```bash
+cd /opt/my-agent
+docker build --target openai-runtime -t my-agent:openai .
+docker rm -f my-agent
+docker run -d \
+  --name my-agent \
+  --restart unless-stopped \
+  --env-file /opt/my-agent/.env \
+  -v /opt/my-agent:/app \
+  my-agent:openai \
+  python cli.py lark-bot
+```
+
+重建后的验证：
+
+```bash
+docker ps --filter name=my-agent
+docker logs --tail 100 my-agent
+
+# 云效只读审查：确认正常后再去掉 --no-comment 发布评论
+docker exec my-agent \
+  python cli.py yunxiao-mr -r <repo_id> -m <mr_id> --no-comment
+```
 
 ## CLI 使用
 
@@ -140,6 +191,11 @@ python cli.py yunxiao-mr \
   -o 5ea86562f89c9700014a671f \
   -d security quality
 
+# 直接传 MR 地址；仓库和 MR 编号会自动解析
+python cli.py yunxiao-mr \
+  -r 'https://code.aliyun.com/<org>/<repo>/change/42' \
+  -o 5ea86562f89c9700014a671f
+
 # 指定业务类型审查
 python cli.py yunxiao-mr -r 2835387 -m 42 --business frontend  # 前端项目规则
 python cli.py yunxiao-mr -r 2835387 -m 42 --business backend   # 后端项目规则
@@ -152,10 +208,12 @@ python cli.py yunxiao-mr -r 2835387 -m 42 --no-comment
 
 1. **获取 MR 详情** - 使用 `mcp__yunxiao__get_change_request` 获取标题、描述、分支信息
 2. **定位源/目标版本** - 使用 `mcp__yunxiao__list_change_request_patch_sets` 获取 patch set
-3. **获取代码差异** - 使用 `mcp__yunxiao__compare` 比较源分支和目标分支
-4. **读取变更文件** - 必要时使用 `mcp__yunxiao__get_file_blobs` 读取完整内容
+3. **获取代码差异** - 使用 `mcp__yunxiao__compare`，显式指定 `straight="false"`，从 merge-base 比较到 MR 源版本，避免将目标分支独有变更算入本次 MR
+4. **读取变更上下文** - 必要时使用 `mcp__yunxiao__get_file_blobs` 读取变更文件；历史代码仅帮助理解，不单独报告历史缺陷
 5. **多维度审查** - 调用 security/quality/performance subagents
 6. **添加评论** - 使用 `mcp__yunxiao__create_change_request_comment` 在 MR 上添加审查评论
+
+OpenAI Responses / Chat Completions 运行时会强制上述 compare 参数，并在输出报告及调用评论接口前校验每条正式问题的文件、行号、old/new 侧和变更行原文。不匹配本次 diff 时拒绝输出或发布。该校验保障证据位置，问题是否由本次修改引入仍需模型结合前后逻辑判断。`--no-comment` 会禁用评论工具；评论回执及工具错误不会被读取内容预算截断。
 
 ## 审查维度
 
@@ -207,6 +265,10 @@ YUNXIAO_ORG_ID=5ea86562f89c9700014a671f
 YUNXIAO_MCP_TRANSPORT=http  # http、streamable_http 或 sse；OpenAI 不支持 stdio
 YUNXIAO_MCP_URL=https://openapi-rdc.aliyuncs.com/ai/mcp?toolsets=code-management
 YUNXIAO_TOOLSETS=code-management
+YUNXIAO_MCP_TIMEOUT=60
+# 进入模型上下文前的 MCP 结果保护（字符数）
+YUNXIAO_MCP_CONTEXT_MAX_CHARS=160000
+YUNXIAO_MCP_RESULT_MAX_CHARS=60000
 
 # 本地工具限制
 MAX_FILE_SIZE_KB=500
@@ -222,6 +284,8 @@ MAX_FILE_SIZE_KB=500
 | 云效 MR 审查 | `YUNXIAO_MCP_URL`, `YUNXIAO_ACCESS_TOKEN` 或 `YUNXIAO_TOKEN` | OpenAI 模式支持 HTTP/SSE MCP，不支持 stdio |
 
 云效 MCP 默认发送 `Authorization: Bearer <token>`、`X-Yunxiao-Token: <token>` 和 `X-Devops-Toolsets`。`YUNXIAO_TOOLSETS` 为空时回退到 `code-management`。
+
+MR 审查优先使用 diff；读取完整文件时，默认单个 MCP 结果最多保留 60000 个字符，所有 MCP 结果最多保留 160000 个字符。超过限制的内容会带有截断标记，Agent 应继续基于已有 diff 审查。可通过 `YUNXIAO_MCP_CONTEXT_MAX_CHARS` 和 `YUNXIAO_MCP_RESULT_MAX_CHARS` 调整。
 
 ## OpenAI-compatible 故障排查
 
