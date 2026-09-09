@@ -7,6 +7,8 @@ import argparse
 import importlib.util
 import os
 import sys
+import uuid
+import pymysql
 from dotenv import load_dotenv
 
 # 强制覆盖系统环境变量，确保 .env 优先
@@ -64,9 +66,18 @@ async def cmd_yunxiao_mr(
     dimensions: list[str] | None,
     auto_comment: bool,
     business_type: str,
+    reply_to_lark: bool = False,
 ) -> int:
     """审查云效 MR，直接调用 CodeReviewAgent"""
     from src.agents.reviewer import CodeReviewAgent, parse_yunxiao_mr_reference
+
+    review_store = None
+    lark_client = None
+    task_id = None
+    chat_id = os.getenv(
+        "LARK_CODE_REVIEW_CHAT_ID",
+        "oc_7ff28089a62b19bf781ca9fa2ac3275d",
+    )
 
     try:
         resolved_repository_id, resolved_local_id = parse_yunxiao_mr_reference(
@@ -76,6 +87,24 @@ async def cmd_yunxiao_mr(
     except ValueError as exc:
         print(f"❌ MR 参数错误: {exc}")
         return 2
+
+    if reply_to_lark:
+        try:
+            from src.lark.client import LarkClient
+            from src.storage.code_review_store import CodeReviewStore
+
+            review_store = CodeReviewStore.from_env()
+            lark_client = LarkClient.from_env()
+            task_id = review_store.create_task(
+                trigger_message_id=f"cli:{uuid.uuid4()}",
+                chat_id=chat_id,
+                mr_url=repository_id,
+                repository_id=resolved_repository_id,
+                local_id=resolved_local_id,
+            )
+        except (KeyError, ValueError, OSError, pymysql.MySQLError) as exc:
+            print(f"❌ 飞书群回传配置错误: {exc}")
+            return 2
 
     print(f"\n🚀 开始审查 MR #{resolved_local_id}（仓库: {repository_id}）")
     print(f"   MCP仓库参数: {resolved_repository_id}")
@@ -90,13 +119,26 @@ async def cmd_yunxiao_mr(
     if dimensions and "all" not in dimensions:
         dim_values = dimensions
 
-    result = await agent.review_yunxiao_mr(
-        repository_id=resolved_repository_id,
-        local_id=resolved_local_id,
-        organization_id=organization_id,
-        dimensions=dim_values,
-        auto_comment=auto_comment,
-    )
+    try:
+        result = await agent.review_yunxiao_mr(
+            repository_id=resolved_repository_id,
+            local_id=resolved_local_id,
+            organization_id=organization_id,
+            dimensions=dim_values,
+            auto_comment=auto_comment,
+        )
+    except Exception as exc:
+        if review_store is not None and task_id is not None:
+            try:
+                review_store.update_result(
+                    task_id,
+                    status="failed",
+                    error_message=str(exc),
+                )
+            except pymysql.MySQLError:
+                pass
+        print(f"❌ 审查执行异常: {exc}")
+        return 1
 
     # 统计实际工具调用
     tools_used = result.get("tools_used", [])
@@ -115,6 +157,13 @@ async def cmd_yunxiao_mr(
             print("\n📝 当前输出:")
             print("-" * 40)
             print(summary)
+        if review_store is not None and task_id is not None:
+            review_store.update_result(
+                task_id,
+                status="failed",
+                review_result=result,
+                error_message=summary or result_type,
+            )
         return 1
 
     print("=" * 50)
@@ -132,6 +181,40 @@ async def cmd_yunxiao_mr(
     print("-" * 40)
     summary = result.get("summary", "（无摘要）")
     print(summary)
+    if reply_to_lark and review_store is not None and lark_client is not None and task_id is not None:
+        from src.agents.review_result import fetch_mr_metadata, publish_review_result
+
+        try:
+            result["mr_metadata"] = fetch_mr_metadata(
+                resolved_repository_id,
+                resolved_local_id,
+                organization_id,
+            )
+            mr_url = str(
+                result["mr_metadata"].get("detailUrl")
+                or result["mr_metadata"].get("webUrl")
+                or repository_id
+            )
+            message_id = publish_review_result(
+                task_id=task_id,
+                result=result,
+                mr_url=mr_url,
+                store=review_store,
+                lark_client=lark_client,
+                chat_id=chat_id,
+            )
+        except Exception as exc:
+            try:
+                review_store.update_result(
+                    task_id,
+                    status="failed",
+                    error_message=str(exc),
+                )
+            except pymysql.MySQLError:
+                pass
+            print(f"❌ Review 已完成，但飞书群回传失败: {exc}")
+            return 1
+        print(f"📨 Review 结果已发送到飞书群（message_id: {message_id}）")
     return 0
 
 
@@ -310,6 +393,11 @@ def main():
                    choices=["security", "quality", "performance", "all"],
                    default=["all"], help="审查维度")
     p.add_argument("--no-comment", action="store_true", help="不自动发评论")
+    p.add_argument(
+        "--reply-to-lark",
+        action="store_true",
+        help="将 Review 结果写入独立表并发送到固定飞书群",
+    )
     p.add_argument("-b", "--business", default="default",
                    choices=["default", "frontend", "backend"],
                    help="业务类型（default/frontend/backend）")
@@ -357,6 +445,7 @@ def main():
             dimensions=args.dimensions,
             auto_comment=not args.no_comment,
             business_type=args.business,
+            reply_to_lark=args.reply_to_lark,
         )))
     elif args.command == "files":
         sys.exit(asyncio.run(cmd_files(args.paths, args.dimensions)))

@@ -43,6 +43,7 @@ class LarkClient:
         resp = requests.post(
             f"{FEISHU_API}/auth/v3/tenant_access_token/internal",
             json={"app_id": self._app_id, "app_secret": self._app_secret},
+            timeout=(3, 15),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -97,6 +98,7 @@ class LarkClient:
             f"{FEISHU_API}/docx/v1/documents/{doc_token}/blocks/batch_update",
             headers=self._headers(),
             json={"requests": updates},
+            timeout=(3, 15),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -104,7 +106,7 @@ class LarkClient:
             raise RuntimeError(f"batch_update_blocks failed [{data.get('code')}]: {data.get('msg')}")
 
     def get_bot_open_id(self) -> str:
-        resp = requests.get(f"{FEISHU_API}/bot/v3/info", headers=self._headers())
+        resp = requests.get(f"{FEISHU_API}/bot/v3/info", headers=self._headers(), timeout=(3, 15))
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
@@ -117,6 +119,7 @@ class LarkClient:
             f"{FEISHU_API}/contact/v3/users/{urllib.parse.quote(open_id, safe='')}",
             headers=self._headers(),
             params={"user_id_type": "open_id"},
+            timeout=(3, 15),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -124,7 +127,30 @@ class LarkClient:
             raise RuntimeError(f"get_user_name failed [{data.get('code')}]: {data.get('msg')}")
         return data.get("data", {}).get("user", {}).get("name", "")
 
-    def send_text_message(self, chat_id: str, text: str) -> None:
+    def get_user_open_id_by_email(self, email: str) -> str:
+        """通过企业邮箱解析飞书 open_id。"""
+        resp = requests.post(
+            f"{FEISHU_API}/contact/v3/users/batch_get_id",
+            headers=self._headers(),
+            params={"user_id_type": "open_id"},
+            json={"emails": [email], "include_resigned": False},
+            timeout=(3, 15),
+        )
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if not resp.ok or data.get("code") != 0:
+            raise RuntimeError(
+                "get_user_open_id_by_email failed: "
+                f"http_status={resp.status_code} "
+                f"code={data.get('code')} msg={data.get('msg')} "
+                f"request_id={resp.headers.get('X-Tt-Logid', '')}"
+            )
+        users = data.get("data", {}).get("user_list") or []
+        return str(users[0].get("user_id") or "") if users else ""
+
+    def send_text_message(self, chat_id: str, text: str) -> str:
         req = (
             CreateMessageRequest.builder()
             .receive_id_type("chat_id")
@@ -140,6 +166,53 @@ class LarkClient:
         resp = self._sdk.im.v1.message.create(req)
         if not resp.success():
             raise RuntimeError(f"send_text_message failed [{resp.code}]: {resp.msg}")
+        return resp.data.message_id
+
+    def send_review_message(
+        self,
+        chat_id: str,
+        text: str,
+        idempotency_key: str,
+        open_id: str = "",
+        user_name: str = "合并人",
+        content_rows: list[list[dict[str, Any]]] | None = None,
+    ) -> str:
+        """幂等发送 Review 结果，并返回真实消息 ID。"""
+        if content_rows is not None:
+            msg_type = "post"
+            content: dict[str, Any] = {
+                "zh_cn": {
+                    "title": "📋 代码审查完成",
+                    "content": content_rows,
+                },
+            }
+        else:
+            msg_type = "text"
+            content = {"text": text}
+        resp = requests.post(
+            f"{FEISHU_API}/im/v1/messages",
+            headers=self._headers(),
+            params={"receive_id_type": "chat_id"},
+            json={
+                "receive_id": chat_id,
+                "msg_type": msg_type,
+                "content": json.dumps(content, ensure_ascii=False),
+                "uuid": idempotency_key,
+            },
+            timeout=(3, 15),
+        )
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if not resp.ok or data.get("code") != 0:
+            raise RuntimeError(
+                "send_review_message failed: "
+                f"http_status={resp.status_code} "
+                f"code={data.get('code')} msg={data.get('msg')} "
+                f"request_id={resp.headers.get('X-Tt-Logid', '')}"
+            )
+        return data["data"]["message_id"]
 
 
 def encode_url(url: str) -> str:
