@@ -366,6 +366,14 @@ def _tool_operation_key(name: str, args: dict[str, Any]) -> str:
     return f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)}"
 
 
+def _guard_rejected_result(error: str) -> dict[str, Any]:
+    """Tell the model that a local review guard rejection is safe to correct and retry."""
+    return {
+        "local_validation_rejected": True,
+        "retryable_error": error,
+    }
+
+
 def _tool_error_message(result: Any) -> str | None:
     if not isinstance(result, dict):
         return None
@@ -615,7 +623,10 @@ class OpenAIAgentRuntime:
                     tool_name = getattr(item, "name", "")
                     args = _loads_json(getattr(item, "arguments", "{}"))
                     guard_error = review_guard.before(tool_name, args) if review_guard else None
-                    _progress(options, f"调用工具: {tool_name} {_summarize_tool_args(args)}")
+                    if guard_error:
+                        _progress(options, f"本地校验拦截，未调用云效: {tool_name} reason={guard_error}")
+                    else:
+                        _progress(options, f"调用工具: {tool_name} {_summarize_tool_args(args)}")
                     messages.append({"type": "tool_use", "tool": tool_name, "input": args})
                     scope_restriction = _mcp_scope_restriction(
                         tool_name,
@@ -626,7 +637,7 @@ class OpenAIAgentRuntime:
                         context_limit=mcp_context_limit,
                     )
                     if guard_error:
-                        result = {"error": guard_error}
+                        result = _guard_rejected_result(guard_error)
                     elif scope_restriction:
                         result = _mcp_scope_blocked_result(scope_restriction)
                     else:
@@ -847,7 +858,10 @@ class OpenAIAgentRuntime:
                 tool_name = call.function.name
                 args = _loads_json(call.function.arguments)
                 guard_error = review_guard.before(tool_name, args) if review_guard else None
-                _progress(options, f"调用工具: {tool_name} {_summarize_tool_args(args)}")
+                if guard_error:
+                    _progress(options, f"本地校验拦截，未调用云效: {tool_name} reason={guard_error}")
+                else:
+                    _progress(options, f"调用工具: {tool_name} {_summarize_tool_args(args)}")
                 messages.append({"type": "tool_use", "tool": tool_name, "input": args})
                 scope_restriction = _mcp_scope_restriction(
                     tool_name,
@@ -858,7 +872,7 @@ class OpenAIAgentRuntime:
                     context_limit=mcp_context_limit,
                 )
                 if guard_error:
-                    result = {"error": guard_error}
+                    result = _guard_rejected_result(guard_error)
                 elif scope_restriction:
                     result = _mcp_scope_blocked_result(scope_restriction)
                 else:

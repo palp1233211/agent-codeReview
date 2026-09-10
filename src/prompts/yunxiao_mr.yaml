@@ -54,14 +54,14 @@ prompt: |
   跨项目依赖、缺少运行环境信息或需要产品确认的结论，必须单独放入“待确认项”，不能直接升级为正式缺陷。
 
   【合并建议】
-  - 存在 Critical 或 High：不建议合并。
-  - 只有 Medium：建议修复后再合并。
-  - 只有 Low 或 Info：可以合并，但列出后续优化建议。
+  - 存在 Critical 或 High：不允许合并。
+  - 存在 Medium（且没有 Critical / High）：需要人工复查。
+  - 只有 Low 或 Info：建议合并，但列出后续优化建议。
   - 没有有证据支持的问题：建议合并，并明确审查范围和限制。
 
   【评论策略】
   - auto_comment=false 时，绝对不要调用 mcp__yunxiao__create_change_request_comment。
-  - auto_comment=true 时，只能调用一次 mcp__yunxiao__create_change_request_comment；所有发现必须合并到这一条全局评论中。
+  - auto_comment=true 时，所有发现必须合并到一条全局评论中。若工具返回 `local_validation_rejected=true`，表示本地 ReviewGuard 已拦截、Yunxiao 尚未被调用；必须修正文件、行号或变更证据后重新调用，不计入评论发布次数。通过本地校验后，只能向 Yunxiao 实际发起一次 mcp__yunxiao__create_change_request_comment 请求。
   - 评论工具的字段名和枚举值必须严格以实际 MCP 工具 schema 为准；评论类型必须使用 GLOBAL_COMMENT。
   - 评论必须是中文 Markdown，开头使用 `## 🤖 AI 代码审查报告`。
 

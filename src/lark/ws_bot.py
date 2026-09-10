@@ -296,7 +296,9 @@ def run_ws_bot() -> int:
     )
 
     try:
-        lark_client = LarkClient.from_env()
+        # Dify 问答只能使用 Dify 机器人自己的应用凭证；Code Review 机器人由
+        # 独立进程和 LARK_CODE_REVIEW_APP_* 凭证处理。
+        lark_client = LarkClient.from_env("LARK_DIFY_")
         dify_client = DifyClient.from_env()
         conversation_store = ConversationStore.from_env()
         gap_store = KnowledgeGapStore.from_env()

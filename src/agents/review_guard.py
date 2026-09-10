@@ -68,10 +68,15 @@ class ReviewGuard:
             args.pop('targetType', None)
         if name == 'mcp__yunxiao__create_change_request_comment':
             if self.commented:
-                return '已尝试发布评论，禁止重复发布。'
+                return '云效评论已实际发起，禁止重复发布。'
             error = self.validate(str(args.get('content') or ''))
             if error:
-                return error
+                return (
+                    f'本地 ReviewGuard 已拦截：{error} '
+                    '未向 Yunxiao 发起请求，不计入一次评论发布；'
+                    '请修正文件、行号或变更证据后重新调用。'
+                    '校验通过后，只允许向 Yunxiao 实际发布一次。'
+                )
             self.commented = True
             self.valid_comment = str(args.get('content') or '')
         return None

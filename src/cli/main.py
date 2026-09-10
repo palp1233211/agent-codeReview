@@ -94,7 +94,9 @@ async def cmd_yunxiao_mr(
             from src.storage.code_review_store import CodeReviewStore
 
             review_store = CodeReviewStore.from_env()
-            lark_client = LarkClient.from_env()
+            # 回传 Review 结果必须以 Code Review 机器人身份发送，不能借用
+            # Dify 问答机器人的凭证。
+            lark_client = LarkClient.from_env("LARK_CODE_REVIEW_")
             task_id = review_store.create_task(
                 trigger_message_id=f"cli:{uuid.uuid4()}",
                 chat_id=chat_id,
@@ -219,11 +221,19 @@ async def cmd_yunxiao_mr(
 
 
 def cmd_lark_bot() -> int:
-    """启动飞书机器人长连接（WebSocket 模式），阻塞运行直到被中断"""
+    """启动 Dify 问答飞书机器人长连接，阻塞运行直到被中断。"""
     from src.lark.ws_bot import run_ws_bot
 
-    print("\n🤖 启动飞书长连接机器人...")
+    print("\n🤖 启动 Dify 飞书长连接机器人...")
     return run_ws_bot()
+
+
+def cmd_lark_code_review_bot() -> int:
+    """启动 Code Review 专用飞书机器人长连接。"""
+    from src.lark.code_review_ws_bot import run_code_review_ws_bot
+
+    print("\n🔎 启动 Code Review 飞书长连接机器人...")
+    return run_code_review_ws_bot()
 
 
 def cmd_kb_doctor() -> int:
@@ -363,6 +373,9 @@ def main():
   # 启动飞书长连接机器人
   python cli.py lark-bot
 
+  # 启动 Code Review 专用飞书机器人
+  python cli.py lark-code-review-bot
+
   # 接管 Dify 里已有的知识文档（先 --dry-run 看看会动哪些）
   python cli.py kb-import --dry-run
 """,
@@ -374,8 +387,9 @@ def main():
     p = subparsers.add_parser("bi-weekly-doc", help="创建 BI 双周迭代上线文档套件（汇总 + 泰国 + 菲律宾）")
     p.add_argument("--date", default=None, help="指定日期，格式 YYYYMMDD（默认取本周四）")
 
-    # lark-bot
-    subparsers.add_parser("lark-bot", help="启动飞书机器人长连接（WebSocket 模式）")
+    # 飞书机器人：Dify 问答与 Code Review 是两个独立飞书应用和常驻进程。
+    subparsers.add_parser("lark-bot", help="启动 Dify 问答飞书机器人（WebSocket 模式）")
+    subparsers.add_parser("lark-code-review-bot", help="启动 Code Review 飞书机器人（WebSocket 模式）")
 
     # kb-doctor
     subparsers.add_parser("kb-doctor", help="检查知识盲区流水线的运行前提")
@@ -425,6 +439,9 @@ def main():
 
     if args.command == "lark-bot":
         sys.exit(cmd_lark_bot())
+
+    if args.command == "lark-code-review-bot":
+        sys.exit(cmd_lark_code_review_bot())
 
     if args.command == "kb-doctor":
         sys.exit(cmd_kb_doctor())

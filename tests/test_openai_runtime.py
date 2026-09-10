@@ -137,6 +137,56 @@ async def test_mr_guard_blocks_historical_comment_and_final_report(mode):
     assert invalid not in str(messages)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['responses', 'chat_completions'])
+async def test_mr_guard_allows_corrected_comment_after_local_rejection(mode):
+    invalid = ('## 🤖 AI 代码审查报告\n#### 1. [问题] `a.php:12`\n'
+               '- 变更证据：new `new`\n### 📊 审查结论\nHigh 1')
+    valid = ('## 🤖 AI 代码审查报告\n#### 1. [问题] `a.php:11`\n'
+             '- 变更证据：new `new`\n### 📊 审查结论\nHigh 1')
+    calls = [
+        ('mcp__yunxiao__compare', {'straight': 'true'}),
+        ('mcp__yunxiao__create_change_request_comment', {'content': invalid}),
+        ('mcp__yunxiao__create_change_request_comment', {'content': valid}),
+    ]
+    if mode == 'responses':
+        outputs = []
+        for i, (name, args) in enumerate(calls):
+            payload = dict(type='function_call', call_id=str(i), name=name,
+                           arguments=json.dumps(args))
+            outputs.append(SimpleNamespace(output=[_ResponseItem(**payload, serialized=payload)], output_text=''))
+        outputs.append(SimpleNamespace(output=[_message(valid)], output_text=valid))
+        create = Mock(side_effect=outputs)
+        client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    else:
+        outputs = []
+        for i, (name, args) in enumerate(calls):
+            call = SimpleNamespace(id=str(i), function=SimpleNamespace(name=name, arguments=json.dumps(args)))
+            outputs.append(SimpleNamespace(choices=[SimpleNamespace(message=_ChatMessage(content=None, tool_calls=[call]))]))
+        outputs.append(SimpleNamespace(choices=[SimpleNamespace(message=_ChatMessage(content=valid, tool_calls=[]))]))
+        create = Mock(side_effect=outputs)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    runtime = OpenAIAgentRuntime(model='test-model')
+    runtime.api_mode = mode
+    runtime._client = client
+    runtime._load_mcp_tools = AsyncMock(return_value={})
+    compare_result = {'content': [{'type': 'text', 'text': json.dumps({
+        'diffs': [{'newPath': 'a.php', 'diff': '@@ -10,2 +10,2 @@\n unchanged\n-old\n+new'}]
+    })}]}
+    runtime._call_tool = AsyncMock(side_effect=[compare_result, {'content': [{'type': 'text', 'text': '{"id": "123"}'}]}])
+
+    messages = await runtime.run('review', RuntimeOptions(
+        allowed_tools=[name for name, _ in calls], max_turns=4, enforce_mr_review=True,
+    ))
+
+    assert runtime._call_tool.await_count == 2
+    assert runtime._call_tool.call_args_list[1].args[0] == 'mcp__yunxiao__create_change_request_comment'
+    assert runtime._call_tool.call_args_list[1].args[1]['content'] == valid
+    assert messages[-1]['subtype'] == 'success'
+    assert messages[-1]['content'] == valid
+
+
 def _function_call(call_id: str, value: str) -> _ResponseItem:
     serialized = {
         "type": "function_call",

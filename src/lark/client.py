@@ -25,10 +25,16 @@ class LarkClient:
         )
 
     @classmethod
-    def from_env(cls) -> "LarkClient":
+    def from_env(cls, env_prefix: str = "LARK_") -> "LarkClient":
+        """按机器人专属环境变量创建客户端。
+
+        ``env_prefix`` 例如 ``LARK_DIFY_`` 或 ``LARK_CODE_REVIEW_``，分别读取
+        ``<prefix>APP_ID`` 和 ``<prefix>APP_SECRET``。不在这里回退到另一套
+        凭证，避免两个机器人误以同一飞书应用身份运行。
+        """
         return cls(
-            app_id=os.environ["LARK_APP_ID"],
-            app_secret=os.environ["LARK_APP_SECRET"],
+            app_id=os.environ[f"{env_prefix}APP_ID"],
+            app_secret=os.environ[f"{env_prefix}APP_SECRET"],
         )
 
     @property
@@ -167,6 +173,36 @@ class LarkClient:
         if not resp.success():
             raise RuntimeError(f"send_text_message failed [{resp.code}]: {resp.msg}")
         return resp.data.message_id
+
+    def reply_text_message(
+        self,
+        message_id: str,
+        text: str,
+        idempotency_key: str,
+    ) -> str:
+        """以当前机器人身份回复指定消息，并返回实际消息 ID。"""
+        resp = requests.post(
+            f"{FEISHU_API}/im/v1/messages/{urllib.parse.quote(message_id, safe='')}/reply",
+            headers=self._headers(),
+            json={
+                "msg_type": "text",
+                "content": json.dumps({"text": text}, ensure_ascii=False),
+                "uuid": idempotency_key,
+            },
+            timeout=(3, 15),
+        )
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if not resp.ok or data.get("code") != 0:
+            raise RuntimeError(
+                "reply_text_message failed: "
+                f"http_status={resp.status_code} "
+                f"code={data.get('code')} msg={data.get('msg')} "
+                f"request_id={resp.headers.get('X-Tt-Logid', '')}"
+            )
+        return data["data"]["message_id"]
 
     def send_review_message(
         self,

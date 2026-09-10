@@ -59,12 +59,24 @@ def fetch_mr_metadata(
 
 
 def _merge_suggestion(summary: str) -> str:
-    match = re.search(r"合并建议[：:]\s*([^\n]+)", summary)
-    value = match.group(1).strip() if match else ""
-    if "不建议合并" in value:
-        return "❌ 不建议合并"
-    if "建议合并" in value:
-        return "✅ 建议合并"
+    """Derive the Feishu merge suggestion from the review severity counts."""
+    counts_line = re.search(r"问题统计[：:]\s*([^\n]+)", summary, flags=re.IGNORECASE)
+    if counts_line:
+        counts = {
+            severity.lower(): int(match.group(1))
+            for severity in ("Critical", "High", "Medium", "Low", "Info")
+            if (match := re.search(
+                rf"\b{severity}\s*[：:]?\s*(\d+)",
+                counts_line.group(1),
+                flags=re.IGNORECASE,
+            ))
+        }
+        if "critical" in counts and "high" in counts and "medium" in counts:
+            if counts["critical"] > 0 or counts["high"] > 0:
+                return "❌ 不允许合并"
+            if counts["medium"] > 0:
+                return "⚠️ 需要人工复查"
+            return "✅ 建议合并"
     return "⚠️ 需要人工复查"
 
 
@@ -195,14 +207,16 @@ def publish_review_result(
 
 
 async def execute_review_task(*, task_id: int, repository_id: str, local_id: str, organization_id: str, mr_url: str, store: Any, lark_client: Any, chat_id: str) -> dict[str, Any]:
-    """执行一次 Review，发送到群并把结果完整回写任务表。"""
+    """执行一次群触发的 Review，写入一条 MR 评论后回传飞书。"""
     store.update_result(task_id, status="running")
     try:
         result = await CodeReviewAgent().review_yunxiao_mr(
             repository_id=repository_id,
             local_id=local_id,
             organization_id=organization_id,
-            auto_comment=False,
+            # 用户从固定飞书群触发的 Review 必须把完整报告写回 MR；审查器会
+            # 约束为唯一一条 GLOBAL_COMMENT，避免一轮审查产生重复评论。
+            auto_comment=True,
         )
         if result.get("is_error"):
             raise RuntimeError(str(result.get("summary") or "Review 执行失败"))

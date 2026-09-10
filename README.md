@@ -10,7 +10,7 @@
 - **Yunxiao MCP**: MR 详情、patch set、diff、文件读取和评论发布都通过 `mcp__yunxiao__*` 工具完成
 - **Hooks 系统**: PreToolUse 验证、PostToolUse 审计
 - **CLI 工具**: 命令行快速审查
-- **飞书长连接 Bot**: 可选运行 `lark-bot`，把群消息转发到 Dify，并支持知识缺口流程
+- **两套飞书机器人**: `lark-bot` 仅处理 Dify 问答；`lark-code-review-bot` 仅处理固定群内 @Code Review 机器人的 Yunxiao MR 链接
 
 ## 项目结构
 
@@ -96,18 +96,27 @@ vim .env
 # 2. 构建完整 OpenAI 应用镜像
 docker build --target openai-runtime -t my-agent:openai .
 
-# 3. 一个常驻容器：飞书 Bot 作为主进程；Code Review 通过 docker exec 执行
+# 3. 两个常驻容器：两个飞书应用各自维持独立长连接
 docker run -d \
-  --name my-agent \
+  --name my-agent-dify \
   --restart unless-stopped \
   --env-file /opt/my-agent/.env \
   -v /opt/my-agent:/app \
   my-agent:openai \
   python cli.py lark-bot
 
+docker run -d \
+  --name my-agent-code-review \
+  --restart unless-stopped \
+  --env-file /opt/my-agent/.env \
+  -v /opt/my-agent:/app \
+  my-agent:openai \
+  python cli.py lark-code-review-bot
+
 # 4. 查看服务状态和日志
 docker ps --filter name=my-agent
-docker logs --tail 100 -f my-agent
+docker logs --tail 100 -f my-agent-dify
+docker logs --tail 100 -f my-agent-code-review
 ```
 
 ### Docker 镜像选择
@@ -132,7 +141,7 @@ OpenAI 模式通过 Python 直接连接 HTTP/SSE Yunxiao MCP，因此 OpenAI run
 | 变更类型 | 操作 | 是否重新构建镜像 | 是否重启容器 |
 |---|---|---:|---:|
 | 只执行一次云效 MR 审查 | `docker exec my-agent python cli.py yunxiao-mr ...` | 否 | 否 |
-| 修改 Python、提示词或 `/opt/my-agent/.env` | 后续 `docker exec` 自动读取新文件；飞书 Bot 执行 `docker restart my-agent` 重新加载 | 否 | 是 |
+| 修改 Python、提示词或 `/opt/my-agent/.env` | 后续 `docker exec` 自动读取新文件；两个飞书 Bot 都要重启重新加载 | 否 | 是 |
 | 修改 `requirements-openai.txt`、`Dockerfile` 或系统依赖 | 重新 `docker build`，再删除并重新创建容器 | 是 | 是 |
 
 修改 Python、提示词或 `.env` 后：
@@ -141,9 +150,10 @@ OpenAI 模式通过 Python 直接连接 HTTP/SSE Yunxiao MCP，因此 OpenAI run
 cd /opt/my-agent
 
 # 下一次 docker exec 审查会直接使用挂载目录中的新代码和 .env。
-# 飞书 Bot 是已启动的 Python 进程，需要重启以加载新代码/配置。
-docker restart my-agent
-docker logs --tail 100 -f my-agent
+# 两个飞书 Bot 都是已启动的 Python 进程，需要重启以加载新代码/配置。
+docker restart my-agent-dify my-agent-code-review
+docker logs --tail 100 -f my-agent-dify
+docker logs --tail 100 -f my-agent-code-review
 ```
 
 修改 `requirements-openai.txt`、Dockerfile 或系统依赖后：
@@ -151,21 +161,29 @@ docker logs --tail 100 -f my-agent
 ```bash
 cd /opt/my-agent
 docker build --target openai-runtime -t my-agent:openai .
-docker rm -f my-agent
+docker rm -f my-agent-dify my-agent-code-review
 docker run -d \
-  --name my-agent \
+  --name my-agent-dify \
   --restart unless-stopped \
   --env-file /opt/my-agent/.env \
   -v /opt/my-agent:/app \
   my-agent:openai \
   python cli.py lark-bot
+docker run -d \
+  --name my-agent-code-review \
+  --restart unless-stopped \
+  --env-file /opt/my-agent/.env \
+  -v /opt/my-agent:/app \
+  my-agent:openai \
+  python cli.py lark-code-review-bot
 ```
 
 重建后的验证：
 
 ```bash
 docker ps --filter name=my-agent
-docker logs --tail 100 my-agent
+docker logs --tail 100 my-agent-dify
+docker logs --tail 100 my-agent-code-review
 
 # 云效只读审查：确认正常后再去掉 --no-comment 发布评论
 docker exec my-agent \
@@ -197,11 +215,11 @@ python cli.py yunxiao-mr \
   -o 5ea86562f89c9700014a671f
 
 # 指定业务类型审查
-python cli.py yunxiao-mr -r 2835387 -m 42 --business frontend  # 前端项目规则
-python cli.py yunxiao-mr -r 2835387 -m 42 --business backend   # 后端项目规则
+python cli.py yunxiao-mr -r 3865544 -m 42 --business frontend  # 前端项目规则
+python cli.py yunxiao-mr -r 3865544 -m 42 --business backend   # 后端项目规则
 
 # 审查云效 MR 但不自动添加评论
-python cli.py yunxiao-mr -r 2835387 -m 42 --no-comment
+python cli.py yunxiao-mr -r 3865544 -m 42 --no-comment
 ```
 
 ## 云效 MR 审查流程
@@ -214,6 +232,12 @@ python cli.py yunxiao-mr -r 2835387 -m 42 --no-comment
 6. **添加评论** - 使用 `mcp__yunxiao__create_change_request_comment` 在 MR 上添加审查评论
 
 OpenAI Responses / Chat Completions 运行时会强制上述 compare 参数，并在输出报告及调用评论接口前校验每条正式问题的文件、行号、old/new 侧和变更行原文。不匹配本次 diff 时拒绝输出或发布。该校验保障证据位置，问题是否由本次修改引入仍需模型结合前后逻辑判断。`--no-comment` 会禁用评论工具；评论回执及工具错误不会被读取内容预算截断。
+
+## Code Review 群反馈
+
+用户必须直接引用机器人发出的 Review 结果消息来反馈，普通文本或引用其他消息不会进入该流程。机器人依据被引用消息的 `parent_id` 精确关联 `lark_code_review_tasks.review_message_id`，随后使用当前配置的 AI Provider（不调用 Dify）判断原 Review 是 `correct`、`false_positive` 或 `uncertain`。
+
+反馈原文、判断结论、置信度及误报原因会写入独立的 `lark_code_review_feedback` 表；只有判为 `false_positive` 时才记录误报分类和原因摘要，供后续优化审查提示词。分析完成后，机器人会直接回复该用户的反馈消息，并将“用户原话 + AI 反馈分析”作为原 Yunxiao MR Review 评论的子回复同步。系统按保存的原评论正文精确匹配目标评论，匹配不到或命中多条时不会猜测目标；只有结论为 `false_positive` 且子回复发布成功后，才会将该原评论标记为已解决。同步结果写入 `analysis_raw.yunxiao_sync`，失败原因保留在 `error_message`。
 
 ## 审查维度
 

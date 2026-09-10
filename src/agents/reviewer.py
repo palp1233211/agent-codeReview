@@ -356,7 +356,10 @@ class CodeReviewAgent:
         )
 
         comment_instruction = (
-            "审查完成后，将所有问题合并为唯一一条中文评论发布到 MR（commentType=GLOBAL_COMMENT，只调用 1 次）。"
+            "审查完成后，将所有问题合并为唯一一条中文评论发布到 MR（commentType=GLOBAL_COMMENT）。"
+            "只有 Yunxiao 实际收到的评论请求才算一次发布；若工具返回 local_validation_rejected，"
+            "表示 ReviewGuard 在本地拦截、Yunxiao 尚未被调用，必须修正文件、行号或变更证据后重新调用。"
+            "校验通过后，只允许向 Yunxiao 实际发布 1 次。"
             if auto_comment
             else "生成审查报告，不需要在 MR 上添加评论（no_comment 模式）。"
         )
