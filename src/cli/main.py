@@ -144,10 +144,7 @@ async def cmd_yunxiao_mr(
 
     # 统计实际工具调用
     tools_used = result.get("tools_used", [])
-    comment_calls = [
-        t for t in tools_used
-        if "mcp__yunxiao__create_change_request_comment" in t
-    ]
+    published_comment_count = int(result.get("published_comment_count") or 0)
 
     if result.get("is_error"):
         result_type = result.get("result_type") or "error"
@@ -174,10 +171,10 @@ async def cmd_yunxiao_mr(
     print(f"\n🔧 工具调用次数: {len(tools_used)}")
 
     if auto_comment:
-        if comment_calls:
-            print(f"💬 评论已发布到 MR（共 {len(comment_calls)} 条）")
+        if published_comment_count:
+            print(f"💬 评论已发布到 MR（共 {published_comment_count} 条）")
         else:
-            print("⚠️  未检测到评论调用，评论可能未成功发布")
+            print("⚠️  未确认评论已发布到 MR")
 
     print("\n📝 审查摘要:")
     print("-" * 40)

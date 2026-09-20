@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from urllib.parse import unquote
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
@@ -15,6 +16,7 @@ from typing import Any
 
 from .mcp_client import HttpMcpClient, McpTool, SseMcpClient, create_http_mcp_clients
 from .review_guard import ReviewGuard
+from .symbol_context import PhpMethodCall, extract_php_calls_at_line, extract_php_method
 
 ToolCallable = Callable[..., Any | Awaitable[Any]]
 
@@ -43,6 +45,7 @@ class RuntimeOptions:
     progress_prefix: str = "agent"
     disallowed_tools: list[str] = field(default_factory=list)
     enforce_mr_review: bool = False
+    enable_symbol_context: bool = False
 
 
 @dataclass
@@ -69,7 +72,20 @@ _TOOLS: dict[str, ToolDefinition] = {}
 
 _DEFAULT_MCP_CONTEXT_MAX_CHARS = 160_000
 _DEFAULT_MCP_RESULT_MAX_CHARS = 60_000
+_DEFAULT_SYMBOL_CONTEXT_MAX_READS = 2
+_DEFAULT_SYMBOL_CONTEXT_MAX_CHARS = 16_000
+_DEFAULT_SYMBOL_CANDIDATE_MAX_FILES = 2
 _MCP_RESULT_TEXT_MARKER = "\n\n[内容已截断：请以 MR diff 为准，避免继续读取无关完整文件。]"
+
+
+@dataclass
+class _SymbolContextState:
+    """Per-review cache and quota for dependency-method context."""
+
+    used_symbols: set[tuple[str, str, str]] = field(default_factory=set)
+    file_cache: dict[tuple[str, str], str] = field(default_factory=dict)
+    candidates: dict[tuple[str, str], list[PhpMethodCall]] = field(default_factory=dict)
+    candidate_files: set[tuple[str, str]] = field(default_factory=set)
 
 
 def agent_tool(name: str, description: str, input_schema: dict[str, Any]):
@@ -143,6 +159,9 @@ def _summarize_tool_args(args: dict[str, Any]) -> str:
         "to",
         "straight",
         "filePath",
+        "callerFile",
+        "callerLine",
+        "symbol",
         "ref",
         "comment_type",
         "subagent_type",
@@ -182,6 +201,30 @@ def _mcp_result_limit() -> int:
         return max(1, int(value)) if value else _DEFAULT_MCP_RESULT_MAX_CHARS
     except ValueError:
         return _DEFAULT_MCP_RESULT_MAX_CHARS
+
+
+def _symbol_context_max_reads() -> int:
+    value = os.getenv("YUNXIAO_SYMBOL_CONTEXT_MAX_READS", "")
+    try:
+        return max(1, int(value)) if value else _DEFAULT_SYMBOL_CONTEXT_MAX_READS
+    except ValueError:
+        return _DEFAULT_SYMBOL_CONTEXT_MAX_READS
+
+
+def _symbol_context_max_chars() -> int:
+    value = os.getenv("YUNXIAO_SYMBOL_CONTEXT_MAX_CHARS", "")
+    try:
+        return max(1, int(value)) if value else _DEFAULT_SYMBOL_CONTEXT_MAX_CHARS
+    except ValueError:
+        return _DEFAULT_SYMBOL_CONTEXT_MAX_CHARS
+
+
+def _symbol_candidate_max_files() -> int:
+    value = os.getenv("YUNXIAO_SYMBOL_CANDIDATE_MAX_FILES", "")
+    try:
+        return max(1, int(value)) if value else _DEFAULT_SYMBOL_CANDIDATE_MAX_FILES
+    except ValueError:
+        return _DEFAULT_SYMBOL_CANDIDATE_MAX_FILES
 
 
 def _serialized_chars(value: Any) -> int:
@@ -275,10 +318,10 @@ def _mcp_scope_restriction(
     """Keep file reads inside the MR scope before making a remote request."""
     if not tool_name.endswith("__get_file_blobs"):
         return None
-    file_path = str(args.get("filePath") or "").strip()
+    file_path = _canonical_file_path(str(args.get("filePath") or ""))
     if changed_files is None:
         return "尚未获得 MR diff，禁止读取完整文件；请先调用 compare。"
-    if file_path not in changed_files:
+    if file_path not in {_canonical_file_path(path) for path in changed_files}:
         return f"文件 {file_path} 不在本次 MR diff 的变更文件集合中，禁止读取。"
     if file_path in read_file_paths:
         return f"文件 {file_path} 已读取过，禁止重复读取。"
@@ -288,10 +331,296 @@ def _mcp_scope_restriction(
     return None
 
 
+def _candidate_file_restriction(
+    tool_name: str,
+    args: dict[str, Any],
+    state: _SymbolContextState,
+) -> str | None:
+    """Do not later leak a caller file after its compact candidates were shown."""
+    if not tool_name.endswith("__get_file_blobs"):
+        return None
+    file_key = (_canonical_file_path(str(args.get("filePath") or "")), str(args.get("ref") or "").strip())
+    if file_key in state.candidate_files:
+        return "该变更文件已提取直接调用候选；请使用 get_yunxiao_method_context，不得再读取完整文件。"
+    return None
+
+
 def _mcp_scope_blocked_result(message: str) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": message}],
         "scope_blocked": True,
+    }
+
+
+def _scope_contains_line(scope: dict[str, Any] | None, file_path: str, line: int) -> bool:
+    """Whether a one-based line is an added/modified line in the MR diff."""
+    details = _scope_file_details(scope, file_path)
+    if not isinstance(details, dict):
+        return False
+    for item in details.get("added_line_ranges", []):
+        try:
+            start_text, _, end_text = str(item).partition("-")
+            start = int(start_text)
+            end = int(end_text) if end_text else start
+        except ValueError:
+            continue
+        if start <= line <= end:
+            return True
+    return False
+
+
+def _canonical_file_path(path: str) -> str:
+    """Compare Yunxiao paths independent of URL encoding or leading slash."""
+    return unquote(path).strip().lstrip("/")
+
+
+def _scope_file_details(scope: dict[str, Any] | None, file_path: str) -> dict[str, Any] | None:
+    canonical_path = _canonical_file_path(file_path)
+    for path, details in (scope or {}).get("files", {}).items():
+        if _canonical_file_path(str(path)) == canonical_path and isinstance(details, dict):
+            return details
+    return None
+
+
+def _mcp_text(result: Any) -> str:
+    """Return plain text from a normal MCP response without exposing it to the model."""
+    if not isinstance(result, dict):
+        return ""
+    return "\n".join(
+        str(block.get("text") or "")
+        for block in result.get("content", [])
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    )
+
+
+def _symbol_context_progress_text(tool_name: str, result: Any) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    if tool_name == "get_yunxiao_call_candidates":
+        return (
+            "调用候选提取完成: "
+            f"callerFile={result.get('caller_file')} candidates={len(result.get('candidates') or [])}"
+        )
+    if tool_name == "get_yunxiao_method_context" and result.get("symbol"):
+        return (
+            "依赖方法上下文完成: "
+            f"symbol={result.get('symbol')} lines={result.get('start_line')}-{result.get('end_line')}"
+        )
+    return None
+
+
+def _comment_publish_succeeded(
+    tool_name: str,
+    result: Any,
+    *,
+    guard_error: str | None,
+    scope_restriction: str | None,
+) -> bool:
+    return (
+        tool_name == "mcp__yunxiao__create_change_request_comment"
+        and not guard_error
+        and not scope_restriction
+        and not (isinstance(result, dict) and result.get("scope_blocked"))
+        and not _tool_error_message(result)
+    )
+
+
+@agent_tool(
+    name="get_yunxiao_method_context",
+    description=(
+        "从 MR 变更行已识别的 PHP 直接调用中，读取被调类的一个完整方法。"
+        "调用方文件、调用行、符号和目标文件均由运行时校验；不支持任意文件读取。"
+    ),
+    input_schema={
+        "organizationId": {"type": "string"},
+        "repositoryId": {"type": "string"},
+        "ref": {"type": "string", "description": "被调方法所在提交"},
+        "filePath": {"type": "string", "description": "被调类文件路径"},
+        "symbol": {"type": "string", "description": "完整类名::方法名"},
+        "callerFile": {"type": "string", "description": "MR 中的调用方文件"},
+        "callerLine": {"type": "integer", "description": "MR 新增或修改的直接调用行"},
+    },
+)
+async def get_yunxiao_method_context_tool(**_: Any) -> dict[str, Any]:
+    """The OpenAI runtime intercepts this tool to retain raw MCP data locally."""
+    return {"error": "get_yunxiao_method_context 只能在云效 MR 审查运行时使用"}
+
+
+@agent_tool(
+    name="get_yunxiao_call_candidates",
+    description=(
+        "从一个 MR 变更文件的新增/修改行静态提取可读取的 PHP 直接调用候选。"
+        "只返回类名、方法名、调用行和调用表达式，不返回完整文件内容。"
+    ),
+    input_schema={
+        "organizationId": {"type": "string"},
+        "repositoryId": {"type": "string"},
+        "ref": {"type": "string", "description": "调用方所在提交"},
+        "callerFile": {"type": "string", "description": "MR 中的调用方文件"},
+    },
+)
+async def get_yunxiao_call_candidates_tool(**_: Any) -> dict[str, Any]:
+    """The OpenAI runtime intercepts this tool to retain raw MCP data locally."""
+    return {"error": "get_yunxiao_call_candidates 只能在云效 MR 审查运行时使用"}
+
+
+async def _fetch_yunxiao_file(
+    args: dict[str, Any],
+    *,
+    file_path: str,
+    ref: str,
+    state: _SymbolContextState,
+    call_mcp: Callable[[str, dict[str, Any]], Awaitable[Any]],
+) -> str | None:
+    cache_key = (file_path, ref)
+    if cache_key in state.file_cache:
+        return state.file_cache[cache_key]
+    result = await call_mcp(
+        "mcp__yunxiao__get_file_blobs",
+        {
+            "organizationId": args["organizationId"],
+            "repositoryId": args["repositoryId"],
+            "filePath": file_path,
+            "ref": ref,
+        },
+    )
+    if _tool_error_message(result):
+        return None
+    content = _mcp_text(result)
+    if not content:
+        return None
+    state.file_cache[cache_key] = content
+    return content
+
+
+async def _read_yunxiao_call_candidates(
+    args: dict[str, Any],
+    *,
+    state: _SymbolContextState,
+    review_scope: dict[str, Any] | None,
+    call_mcp: Callable[[str, dict[str, Any]], Awaitable[Any]],
+) -> dict[str, Any]:
+    """Expose only direct-call metadata for changed PHP lines, never caller source."""
+    required = ("organizationId", "repositoryId", "ref", "callerFile")
+    missing = [key for key in required if args.get(key) in (None, "")]
+    if missing:
+        return _mcp_scope_blocked_result("调用候选提取缺少参数: " + ", ".join(missing))
+    caller_file = str(args["callerFile"]).strip()
+    ref = str(args["ref"]).strip()
+    details = _scope_file_details(review_scope, caller_file)
+    if not isinstance(details, dict):
+        return _mcp_scope_blocked_result("callerFile 不在 MR 变更文件范围内")
+    candidate_key = (_canonical_file_path(caller_file), ref)
+    if candidate_key not in state.candidate_files and len(state.candidate_files) >= _symbol_candidate_max_files():
+        return _mcp_scope_blocked_result("调用候选文件读取数量已达上限，请从已有候选中继续审查")
+    source = await _fetch_yunxiao_file(
+        args, file_path=caller_file, ref=ref, state=state, call_mcp=call_mcp,
+    )
+    if source is None:
+        return _mcp_scope_blocked_result("无法读取调用方文件，未提取调用候选")
+    try:
+        calls = [
+            call
+            for item in details.get("added_line_ranges", [])
+            for line in _expand_line_range(str(item))
+            for call in extract_php_calls_at_line(source, line)
+        ]
+    except ValueError as exc:
+        return _mcp_scope_blocked_result(str(exc))
+    unique = {(call.line, call.symbol, call.expression): call for call in calls}
+    selected = list(unique.values())
+    state.candidate_files.add(candidate_key)
+    state.candidates[candidate_key] = selected
+    return {
+        "candidates": [
+            {
+                "caller_line": call.line,
+                "symbol": call.symbol,
+                "expression": call.expression,
+            }
+            for call in selected
+        ],
+        "caller_file": caller_file,
+    }
+
+
+def _expand_line_range(value: str) -> range:
+    start_text, _, end_text = value.partition("-")
+    start = int(start_text)
+    end = int(end_text) if end_text else start
+    return range(start, end + 1)
+
+
+async def _read_yunxiao_method_context(
+    args: dict[str, Any],
+    *,
+    state: _SymbolContextState,
+    review_scope: dict[str, Any] | None,
+    call_mcp: Callable[[str, dict[str, Any]], Awaitable[Any]],
+) -> dict[str, Any]:
+    """Fetch caller/target privately and return one AST-verified PHP method."""
+    required = ("organizationId", "repositoryId", "ref", "filePath", "symbol", "callerFile", "callerLine")
+    missing = [key for key in required if args.get(key) in (None, "")]
+    if missing:
+        return _mcp_scope_blocked_result("按方法读取缺少参数: " + ", ".join(missing))
+
+    caller_file = str(args["callerFile"]).strip()
+    target_file = str(args["filePath"]).strip()
+    ref = str(args["ref"]).strip()
+    symbol = str(args["symbol"]).strip().lstrip("\\")
+    try:
+        caller_line = int(args["callerLine"])
+    except (TypeError, ValueError):
+        return _mcp_scope_blocked_result("callerLine 必须是 MR 变更中的正整数行号")
+    if caller_line < 1 or not _scope_contains_line(review_scope, caller_file, caller_line):
+        return _mcp_scope_blocked_result("callerLine 未命中 MR 新增或修改行，拒绝读取依赖方法")
+    if "::" not in symbol:
+        return _mcp_scope_blocked_result("symbol 必须为完整类名::方法名")
+
+    expected_class, method_name = symbol.rsplit("::", 1)
+    key = (target_file, ref, symbol)
+    if key not in state.used_symbols and len(state.used_symbols) >= _symbol_context_max_reads():
+        return _mcp_scope_blocked_result("依赖方法读取数量已达上限，请基于已有上下文审查")
+
+    candidates = state.candidates.get((_canonical_file_path(caller_file), ref))
+    if candidates is None:
+        return _mcp_scope_blocked_result("请先用 get_yunxiao_call_candidates 提取该变更文件的直接调用候选")
+    caller_source = await _fetch_yunxiao_file(
+        args, file_path=caller_file, ref=ref, state=state, call_mcp=call_mcp,
+    )
+    if caller_source is None:
+        return _mcp_scope_blocked_result("无法读取调用方文件，未读取被调方法")
+    try:
+        verified_calls = extract_php_calls_at_line(caller_source, caller_line)
+    except ValueError as exc:
+        return _mcp_scope_blocked_result(str(exc))
+    if not any(call.line == caller_line and call.symbol.lstrip("\\") == symbol for call in candidates):
+        return _mcp_scope_blocked_result("请求的符号不在已提取的调用候选中，拒绝扩读")
+    if not any(call.symbol.lstrip("\\") == symbol for call in verified_calls):
+        return _mcp_scope_blocked_result("请求的符号不是该 MR 变更行可静态确认的直接调用，拒绝扩读")
+
+    target_source = await _fetch_yunxiao_file(
+        args, file_path=target_file, ref=ref, state=state, call_mcp=call_mcp,
+    )
+    if target_source is None:
+        return _mcp_scope_blocked_result("无法读取被调类文件")
+    try:
+        context = extract_php_method(target_source, expected_class, method_name)
+    except ValueError as exc:
+        return _mcp_scope_blocked_result(str(exc))
+    if context is None:
+        return _mcp_scope_blocked_result("目标文件未找到与请求符号完全匹配的方法，拒绝返回内容")
+    if len(context.content) > _symbol_context_max_chars():
+        return _mcp_scope_blocked_result("被调方法超过内容上限，拒绝截断不完整的方法体")
+
+    state.used_symbols.add(key)
+    return {
+        "content": [{"type": "text", "text": context.content}],
+        "symbol": context.symbol,
+        "file_path": target_file,
+        "start_line": context.start_line,
+        "end_line": context.end_line,
+        "caller": {"file_path": caller_file, "line": caller_line},
     }
 
 
@@ -586,6 +915,8 @@ class OpenAIAgentRuntime:
         mcp_result_limit = _mcp_result_limit()
         changed_files: set[str] | None = None
         read_file_paths: set[str] = set()
+        review_scope: dict[str, Any] | None = None
+        symbol_context_state = _SymbolContextState()
 
         review_guard = ReviewGuard() if options.enforce_mr_review else None
 
@@ -628,7 +959,9 @@ class OpenAIAgentRuntime:
                     else:
                         _progress(options, f"调用工具: {tool_name} {_summarize_tool_args(args)}")
                     messages.append({"type": "tool_use", "tool": tool_name, "input": args})
-                    scope_restriction = _mcp_scope_restriction(
+                    scope_restriction = _candidate_file_restriction(
+                        tool_name, args, symbol_context_state,
+                    ) or _mcp_scope_restriction(
                         tool_name,
                         args,
                         changed_files=changed_files,
@@ -638,6 +971,32 @@ class OpenAIAgentRuntime:
                     )
                     if guard_error:
                         result = _guard_rejected_result(guard_error)
+                    elif tool_name in {"get_yunxiao_call_candidates", "get_yunxiao_method_context"}:
+                        if not options.enable_symbol_context:
+                            result = _mcp_scope_blocked_result("当前运行时未启用按方法读取")
+                        elif mcp_context_chars >= mcp_context_limit:
+                            result = _mcp_scope_blocked_result("MCP 内容预算已用尽，拒绝读取依赖方法")
+                        else:
+                            async def call_mcp(name: str, call_args: dict[str, Any]) -> Any:
+                                return await self._call_tool(
+                                    name, call_args, cwd=cwd, hooks=options.hooks,
+                                    agents=options.agents, max_turns=options.max_turns,
+                                    verbose=options.verbose, progress_prefix=options.progress_prefix,
+                                    mcp_tools=mcp_tools, allowed_tools=options.allowed_tools,
+                                    disallowed_tools=options.disallowed_tools,
+                                )
+                            if tool_name == "get_yunxiao_call_candidates":
+                                result = await _read_yunxiao_call_candidates(
+                                    args, state=symbol_context_state, review_scope=review_scope,
+                                    call_mcp=call_mcp,
+                                )
+                            else:
+                                result = await _read_yunxiao_method_context(
+                                    args, state=symbol_context_state, review_scope=review_scope,
+                                    call_mcp=call_mcp,
+                                )
+                            if _serialized_chars(result) > mcp_context_limit - mcp_context_chars:
+                                result = _mcp_scope_blocked_result("依赖方法上下文超过剩余内容预算，拒绝截断")
                     elif scope_restriction:
                         result = _mcp_scope_blocked_result(scope_restriction)
                     else:
@@ -661,6 +1020,9 @@ class OpenAIAgentRuntime:
                         scope = _extract_compare_scope(result)
                         if scope:
                             changed_files = set(scope["files"])
+                            review_scope = scope
+                    if (symbol_progress := _symbol_context_progress_text(tool_name, result)):
+                        _progress(options, symbol_progress)
                     result = _compact_mcp_result(
                         tool_name,
                         result,
@@ -669,7 +1031,7 @@ class OpenAIAgentRuntime:
                             mcp_context_limit - mcp_context_chars,
                         ),
                     ) if tool_name.startswith("mcp__") else result
-                    if tool_name.startswith("mcp__"):
+                    if tool_name.startswith("mcp__") or tool_name in {"get_yunxiao_call_candidates", "get_yunxiao_method_context"}:
                         mcp_context_chars += _serialized_chars(result)
                     operation_key = _tool_operation_key(tool_name, args)
                     tool_error = _tool_error_message(result)
@@ -677,6 +1039,11 @@ class OpenAIAgentRuntime:
                         unresolved_tool_errors[operation_key] = tool_error
                     else:
                         unresolved_tool_errors.pop(operation_key, None)
+                    if _comment_publish_succeeded(
+                        tool_name, result,
+                        guard_error=guard_error, scope_restriction=scope_restriction,
+                    ):
+                        messages.append({"type": "comment_published", "tool": tool_name})
                     tool_outputs.append(
                         {
                             "type": "function_call_output",
@@ -808,6 +1175,8 @@ class OpenAIAgentRuntime:
         mcp_result_limit = _mcp_result_limit()
         changed_files: set[str] | None = None
         read_file_paths: set[str] = set()
+        review_scope: dict[str, Any] | None = None
+        symbol_context_state = _SymbolContextState()
         review_guard = ReviewGuard() if options.enforce_mr_review else None
         for _ in range(options.max_turns):
             response = await asyncio.to_thread(
@@ -863,7 +1232,9 @@ class OpenAIAgentRuntime:
                 else:
                     _progress(options, f"调用工具: {tool_name} {_summarize_tool_args(args)}")
                 messages.append({"type": "tool_use", "tool": tool_name, "input": args})
-                scope_restriction = _mcp_scope_restriction(
+                scope_restriction = _candidate_file_restriction(
+                    tool_name, args, symbol_context_state,
+                ) or _mcp_scope_restriction(
                     tool_name,
                     args,
                     changed_files=changed_files,
@@ -873,6 +1244,32 @@ class OpenAIAgentRuntime:
                 )
                 if guard_error:
                     result = _guard_rejected_result(guard_error)
+                elif tool_name in {"get_yunxiao_call_candidates", "get_yunxiao_method_context"}:
+                    if not options.enable_symbol_context:
+                        result = _mcp_scope_blocked_result("当前运行时未启用按方法读取")
+                    elif mcp_context_chars >= mcp_context_limit:
+                        result = _mcp_scope_blocked_result("MCP 内容预算已用尽，拒绝读取依赖方法")
+                    else:
+                        async def call_mcp(name: str, call_args: dict[str, Any]) -> Any:
+                            return await self._call_tool(
+                                name, call_args, cwd=cwd, hooks=options.hooks,
+                                agents=options.agents, max_turns=options.max_turns,
+                                verbose=options.verbose, progress_prefix=options.progress_prefix,
+                                mcp_tools=mcp_tools, allowed_tools=options.allowed_tools,
+                                disallowed_tools=options.disallowed_tools,
+                            )
+                        if tool_name == "get_yunxiao_call_candidates":
+                            result = await _read_yunxiao_call_candidates(
+                                args, state=symbol_context_state, review_scope=review_scope,
+                                call_mcp=call_mcp,
+                            )
+                        else:
+                            result = await _read_yunxiao_method_context(
+                                args, state=symbol_context_state, review_scope=review_scope,
+                                call_mcp=call_mcp,
+                            )
+                        if _serialized_chars(result) > mcp_context_limit - mcp_context_chars:
+                            result = _mcp_scope_blocked_result("依赖方法上下文超过剩余内容预算，拒绝截断")
                 elif scope_restriction:
                     result = _mcp_scope_blocked_result(scope_restriction)
                 else:
@@ -896,6 +1293,9 @@ class OpenAIAgentRuntime:
                     scope = _extract_compare_scope(result)
                     if scope:
                         changed_files = set(scope["files"])
+                        review_scope = scope
+                if (symbol_progress := _symbol_context_progress_text(tool_name, result)):
+                    _progress(options, symbol_progress)
                 result = _compact_mcp_result(
                     tool_name,
                     result,
@@ -904,7 +1304,7 @@ class OpenAIAgentRuntime:
                         mcp_context_limit - mcp_context_chars,
                     ),
                 ) if tool_name.startswith("mcp__") else result
-                if tool_name.startswith("mcp__"):
+                if tool_name.startswith("mcp__") or tool_name in {"get_yunxiao_call_candidates", "get_yunxiao_method_context"}:
                     mcp_context_chars += _serialized_chars(result)
                 operation_key = _tool_operation_key(tool_name, args)
                 tool_error = _tool_error_message(result)
@@ -912,6 +1312,11 @@ class OpenAIAgentRuntime:
                     unresolved_tool_errors[operation_key] = tool_error
                 else:
                     unresolved_tool_errors.pop(operation_key, None)
+                if _comment_publish_succeeded(
+                    tool_name, result,
+                    guard_error=guard_error, scope_restriction=scope_restriction,
+                ):
+                    messages.append({"type": "comment_published", "tool": tool_name})
                 chat_messages.append(
                     {
                         "role": "tool",

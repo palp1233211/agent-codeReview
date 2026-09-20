@@ -388,9 +388,17 @@ class CodeReviewAgent:
         provider = (os.getenv("AGENT_PROVIDER") or os.getenv("AGENT_SDK") or "claude").lower()
         validate_openai_runtime_config(provider, require_yunxiao_mcp=True)
         mcp_config = _get_yunxiao_mcp_config() if provider in OPENAI_PROVIDERS else {}
+        allowed_tools = list(YUNXIAO_MR_AGENT.tools)
+        symbol_context_enabled = provider in OPENAI_PROVIDERS
+        if symbol_context_enabled:
+            allowed_tools.extend([
+                "get_yunxiao_call_candidates",
+                "get_yunxiao_method_context",
+            ])
         options = RuntimeOptions(
-            allowed_tools=list(YUNXIAO_MR_AGENT.tools),
+            allowed_tools=allowed_tools,
             enforce_mr_review=True,
+            enable_symbol_context=symbol_context_enabled,
             allowed_agents=self._dimension_agent_names(dimensions)
             or ["security-reviewer", "quality-reviewer", "performance-reviewer"],
             hooks=self.hooks,
@@ -474,6 +482,11 @@ class CodeReviewAgent:
             for msg in messages
             if msg.get("type") == "tool_use"
         ]
+        published_comment_count = sum(
+            1
+            for msg in messages
+            if msg.get("type") == "comment_published"
+        )
 
         return {
             "raw_messages": messages,
@@ -481,6 +494,7 @@ class CodeReviewAgent:
             "result_type": result_type,
             "is_error": is_error,
             "tools_used": tools_used,
+            "published_comment_count": published_comment_count,
         }
 
 

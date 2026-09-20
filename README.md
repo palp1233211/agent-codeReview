@@ -293,6 +293,10 @@ YUNXIAO_MCP_TIMEOUT=60
 # 进入模型上下文前的 MCP 结果保护（字符数）
 YUNXIAO_MCP_CONTEXT_MAX_CHARS=160000
 YUNXIAO_MCP_RESULT_MAX_CHARS=60000
+# PHP 依赖方法上下文（仅 OpenAI / OpenAI-compatible MR 审查）
+YUNXIAO_SYMBOL_CONTEXT_MAX_READS=2
+YUNXIAO_SYMBOL_CONTEXT_MAX_CHARS=16000
+YUNXIAO_SYMBOL_CANDIDATE_MAX_FILES=2
 
 # 本地工具限制
 MAX_FILE_SIZE_KB=500
@@ -310,6 +314,8 @@ MAX_FILE_SIZE_KB=500
 云效 MCP 默认发送 `Authorization: Bearer <token>`、`X-Yunxiao-Token: <token>` 和 `X-Devops-Toolsets`。`YUNXIAO_TOOLSETS` 为空时回退到 `code-management`。
 
 MR 审查优先使用 diff；读取完整文件时，默认单个 MCP 结果最多保留 60000 个字符，所有 MCP 结果最多保留 160000 个字符。超过限制的内容会带有截断标记，Agent 应继续基于已有 diff 审查。可通过 `YUNXIAO_MCP_CONTEXT_MAX_CHARS` 和 `YUNXIAO_MCP_RESULT_MAX_CHARS` 调整。
+
+OpenAI MR 审查会对 PHP 变更行中的静态直接调用提供两步式上下文读取：先提取候选调用（只返回类名、方法名、调用行和表达式），再读取一个经 AST 校验的被调方法。支持 `Class::method()`、`new Class()->method()`、带类型属性注入和构造器注入；模型不能任意指定依赖方法。调用行必须在 MR diff 中，目标方法必须与候选和目标类定义完全匹配。完整的调用方/被调类文件仅在机器人内存中用于解析，不会传给模型。默认每个 MR 最多读取 2 个候选调用方文件、2 个方法、单方法最多 16000 字符；超过上限或动态调用无法解析时，不读取完整依赖文件。
 
 ## OpenAI-compatible 故障排查
 
