@@ -1,5 +1,8 @@
 # Agent SDKs
 openai>=1.99.0
+pydantic>=2.7,<3
+fastapi>=0.110,<1
+uvicorn>=0.29,<1
 anthropic>=0.40.0
 claude-agent-sdk>=0.1.50
 

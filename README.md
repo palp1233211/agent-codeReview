@@ -11,6 +11,7 @@
 - **Hooks 系统**: PreToolUse 验证、PostToolUse 审计
 - **CLI 工具**: 命令行快速审查
 - **两套飞书机器人**: `lark-bot` 仅处理 Dify 问答；`lark-code-review-bot` 仅处理固定群内 @Code Review 机器人的 Yunxiao MR 链接
+- **妥投证据审核 Agent**: 提供同步 HTTP 接口，支持图片审核与录音/录屏对话审核，返回结构化证据结果
 
 ## 项目结构
 
@@ -80,7 +81,44 @@ python cli.py yunxiao-mr \
 
 # 本地文件审查
 python cli.py files src/agents/reviewer.py -d security quality
+
+# 启动妥投图片与通话审核 HTTP 服务（另一个终端运行）
+python -m uvicorn src.delivery_image.api:app --host 0.0.0.0 --port 8000
 ```
+
+PHP 调用方逐条请求 `POST /v1/delivery-image/reviews`，使用 `Authorization: Bearer $DELIVERY_IMAGE_SERVICE_TOKEN`。
+
+请求包含 `request_id`、`pno`、`country`、`platform`、`direction` 和 `images`；`recipient_phone` 为可选收件手机号（客户确认类图片需要此参数核对身份）；每个 `images` 元素包含唯一的 `image_id` 和 HTTPS `url`。图片列表至少包含一张，不限制图片数量。`platform` 支持 `TT`、`SHOPEE`、`LAZADA`、`SHEIN`、`TMALL`；`LAZADA` 采用当前生效的新版规则；`direction` 为 `forward`（正向）或 `return`（退件）。为匹配 DNR 规则，调用方应提供平台和方向；缺失时整体结论返回 `uncertain`。服务按数组顺序逐张审核，每次只向模型发送一张图；遇到一张单独满足要求的图片后立即通过整单并停止审核后续图片。响应 `image_results` 逐图包含 `evidence_type`、`policy_match`、`review_status`、`conclusion` 和 `findings`；未审核图片标记为 `skipped`。`findings` 会保留图片中实际识别到的运单号、手机号原文及其比对状态；字段模糊时记录可辨认字符和不确定位置。
+
+录音和录屏使用独立接口 `POST /v1/delivery-conversation/reviews`，不能把视频 URL 放入图片的 `images` 数组。请求体示例：
+
+```json
+{
+  "request_id": "local-test-001",
+  "pno": "THT01435EPYZ56Z",
+  "country": "TH",
+  "platform": "SHOPEE",
+  "media_files": [
+    {
+      "media_id": "media-1",
+      "media_type": "video",
+      "url": "https://fle-asset.example.com/callback.mp4"
+    }
+  ]
+}
+```
+
+`media_type` 为 `audio` 或 `video`。服务从传入的 HTTPS 媒体地址下载文件；若为视频，先在服务端提取音轨并转换为 16 kHz 单声道 WAV，再按 `qwen-audio-3.1-asr-flash-filetrans` 示例流程上传到 Qwen 临时 OSS，提交带说话人分离和目标运单热词的异步转写任务并轮询结果。随后由 Qwen `qwen-plus` 分析说话人角色、目标运单号和客户收货表达；只有号码匹配且客户本人明确说已收到包裹时才返回 `supports_delivery`。响应逐项返回转写、识别到的号码、匹配状态、客户收货原话和时间点；说话人不明、号码听不清或模型失败时返回 `uncertain`。该流程仅处理 5 分钟以内的媒体，容器需要安装 `ffmpeg`/`ffprobe`。`DELIVERY_AUDIO_FILETRANS_MODEL` 默认是 `qwen-audio-3.1-asr-flash-filetrans`，`DELIVERY_AUDIO_BASE_URL` 默认是 `https://maas.qianwenaiapi.com/api/v1`；语义审核由 `DELIVERY_CONVERSATION_ANALYSIS_MODEL`、`DELIVERY_CONVERSATION_ANALYSIS_BASE_URL` 和 `DELIVERY_CONVERSATION_ANALYSIS_API_MODE` 控制，默认使用 `qwen-plus`、百炼 OpenAI 兼容接口和 Chat Completions。两个阶段的专用 Token 留空时都会读取 `DASHSCOPE_API_KEY`，再回退到 `DELIVERY_IMAGE_API_TOKEN`。媒体下载默认最多等待 90 秒，可通过 `DELIVERY_MEDIA_DOWNLOAD_TIMEOUT` 调整；每个请求最多20个媒体文件，源文件及提取后的音频各自不超过24 MiB；Qwen 转写默认最多等待 600 秒，每单默认总时限 900 秒，可分别通过 `DELIVERY_AUDIO_TIMEOUT` 和 `DELIVERY_CONVERSATION_TOTAL_TIMEOUT` 调整。
+
+音视频接口的 `platform` 与图片接口使用相同代码，支持 `TT`、`SHOPEE`、`LAZADA`、`SHEIN`、`TMALL`，大小写不敏感。`LAZADA` 使用当前生效的新版规则；通话视频在除 `LAZADA` 外的平台可采纳，通话音频仅在 `SHOPEE`、`SHEIN`、`TMALL` 可采纳。省略 `platform` 时仍处理转写，但不会自动判定妥投。
+
+本地视频如果只审核对话，可先在本机提取音轨并压缩成单声道 MP3，再上传到审核容器可访问的 HTTPS 对象存储，把返回的直连地址作为 `media_files[].url`，并将 `media_type` 设为 `audio`。例如：
+
+```bash
+ffmpeg -hide_banner -i "$HOME/Downloads/call.mp4" -map 0:a:0 -vn -ac 1 -ar 16000 -c:a libmp3lame -b:a 64k "$HOME/Downloads/call-audio.mp3"
+```
+
+不要把本机路径当作 URL 传入；服务运行在容器中，无法直接读取宿主机文件。对象存储域名必须在 `DELIVERY_IMAGE_ALLOWED_HOSTS` 中，音频需不超过 24 MiB、时长不超过 5 分钟。只上传音频后，审核无法检查视频画面中的号码或其他视觉信息。
 
 ## 服务器部署
 
@@ -96,7 +134,7 @@ vim .env
 # 2. 构建完整 OpenAI 应用镜像
 docker build --target openai-runtime -t my-agent:openai .
 
-# 3. 两个常驻容器：两个飞书应用各自维持独立长连接
+# 3. 启动三个常驻容器：两个飞书应用和妥投证据审核 HTTP 服务
 docker run -d \
   --name my-agent-dify \
   --restart unless-stopped \
@@ -113,10 +151,20 @@ docker run -d \
   my-agent:openai \
   python cli.py lark-code-review-bot
 
+docker run -d \
+  --name my-agent-delivery-image \
+  --restart unless-stopped \
+  --env-file /opt/my-agent/.env \
+  -p 8000:8000 \
+  -v /opt/my-agent:/app \
+  my-agent:openai \
+  python -m uvicorn src.delivery_image.api:app --host 0.0.0.0 --port 8000
+
 # 4. 查看服务状态和日志
 docker ps --filter name=my-agent
 docker logs --tail 100 -f my-agent-dify
 docker logs --tail 100 -f my-agent-code-review
+curl http://127.0.0.1:8000/health
 ```
 
 ### Docker 镜像选择
@@ -141,7 +189,7 @@ OpenAI 模式通过 Python 直接连接 HTTP/SSE Yunxiao MCP，因此 OpenAI run
 | 变更类型 | 操作 | 是否重新构建镜像 | 是否重启容器 |
 |---|---|---:|---:|
 | 只执行一次云效 MR 审查 | `docker exec my-agent python cli.py yunxiao-mr ...` | 否 | 否 |
-| 修改 Python、提示词或 `/opt/my-agent/.env` | 后续 `docker exec` 自动读取新文件；两个飞书 Bot 都要重启重新加载 | 否 | 是 |
+| 修改 Python、提示词或 `/opt/my-agent/.env` | 后续 `docker exec` 自动读取新文件；三个常驻服务都要重启重新加载 | 否 | 是 |
 | 修改 `requirements-openai.txt`、`Dockerfile` 或系统依赖 | 重新 `docker build`，再删除并重新创建容器 | 是 | 是 |
 
 修改 Python、提示词或 `.env` 后：
@@ -151,7 +199,7 @@ cd /opt/my-agent
 
 # 下一次 docker exec 审查会直接使用挂载目录中的新代码和 .env。
 # 两个飞书 Bot 都是已启动的 Python 进程，需要重启以加载新代码/配置。
-docker restart my-agent-dify my-agent-code-review
+docker restart my-agent-dify my-agent-code-review my-agent-delivery-image
 docker logs --tail 100 -f my-agent-dify
 docker logs --tail 100 -f my-agent-code-review
 ```
@@ -161,7 +209,7 @@ docker logs --tail 100 -f my-agent-code-review
 ```bash
 cd /opt/my-agent
 docker build --target openai-runtime -t my-agent:openai .
-docker rm -f my-agent-dify my-agent-code-review
+docker rm -f my-agent-dify my-agent-code-review my-agent-delivery-image
 docker run -d \
   --name my-agent-dify \
   --restart unless-stopped \
@@ -176,6 +224,14 @@ docker run -d \
   -v /opt/my-agent:/app \
   my-agent:openai \
   python cli.py lark-code-review-bot
+docker run -d \
+  --name my-agent-delivery-image \
+  --restart unless-stopped \
+  --env-file /opt/my-agent/.env \
+  -p 8000:8000 \
+  -v /opt/my-agent:/app \
+  my-agent:openai \
+  python -m uvicorn src.delivery_image.api:app --host 0.0.0.0 --port 8000
 ```
 
 重建后的验证：
@@ -184,6 +240,8 @@ docker run -d \
 docker ps --filter name=my-agent
 docker logs --tail 100 my-agent-dify
 docker logs --tail 100 my-agent-code-review
+docker logs --tail 100 my-agent-delivery-image
+curl http://127.0.0.1:8000/health
 
 # 云效只读审查：确认正常后再去掉 --no-comment 发布评论
 docker exec my-agent \

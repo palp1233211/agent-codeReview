@@ -12,6 +12,11 @@ WORKDIR /app
 COPY requirements-openai.txt .
 RUN pip install --no-cache-dir -r requirements-openai.txt
 
+# Qwen 同步 ASR 说话人分离要求 16 kHz 单声道 WAV；运行时抽取视频/音频轨。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY . .
 
 RUN useradd -m -u 1000 pn \
@@ -44,6 +49,11 @@ RUN npm config set registry https://registry.npmmirror.com \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Qwen 同步 ASR 说话人分离要求 16 kHz 单声道 WAV；运行时抽取视频/音频轨。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 
