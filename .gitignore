@@ -21,6 +21,7 @@ wheels/
 .installed.cfg
 *.egg
 tests/*
+!tests/test_delivery_video_phone.py
 
 # Environment
 .env

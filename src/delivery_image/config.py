@@ -27,7 +27,7 @@ class DeliveryImageConfig:
     base_url: str | None = None
     timeout_seconds: float = 45.0
     prompt_version: str = "delivery-image-v4"
-    audio_filetrans_model: str = "qwen-audio-3.1-asr-flash-filetrans"
+    audio_model: str = "qwen-audio-3.1-asr-flash"
     audio_api_token: str | None = None
     audio_base_url: str = _DEFAULT_AUDIO_BASE_URL
     audio_timeout_seconds: float = 600.0
@@ -120,9 +120,9 @@ class DeliveryImageConfig:
             base_url=base_url,
             timeout_seconds=timeout_seconds,
             prompt_version=values.get("DELIVERY_IMAGE_PROMPT_VERSION", "delivery-image-v4").strip(),
-            audio_filetrans_model=values.get(
-                "DELIVERY_AUDIO_FILETRANS_MODEL",
-                "qwen-audio-3.1-asr-flash-filetrans",
+            audio_model=values.get(
+                "DELIVERY_AUDIO_MODEL",
+                "qwen-audio-3.1-asr-flash",
             ).strip(),
             audio_api_token=(
                 values.get("DELIVERY_AUDIO_API_TOKEN", "").strip()
