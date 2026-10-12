@@ -94,6 +94,8 @@ class DeliveryImageRequest(BaseModel):
     country: Annotated[str, Field(min_length=2, max_length=8)]
     platform: DeliveryPlatform | None = None
     direction: DeliveryDirection | None = None
+    # 退件单与客户沟通时可能使用正向运单号（TT 退件要求按正向单号沟通）。
+    forward_pno: Annotated[str | None, Field(min_length=1, max_length=128)] = None
     # 收件手机号由业务调用方提供，供模型从聊天截图中识别后进行身份核对。
     recipient_phone: Annotated[str | None, Field(min_length=5, max_length=32)] = None
     # 图片数量不设上限；Agent 会按顺序逐张审核，满足条件后提前停止。
@@ -124,6 +126,27 @@ class DeliveryImageResult(BaseModel):
     review_status: ImageReviewStatus = ImageReviewStatus.REVIEWED
     conclusion: DeliveryImageConclusion
     findings: list[str] = Field(default_factory=list)
+    # 单图无法独立满足规则时，模型列出尚缺的条件，供联合复核和人工查看。
+    missing_conditions: list[str] = Field(default_factory=list)
+
+
+class ConditionCheck(BaseModel):
+    """联合复核中的单项条件核对；evidence_image_id 指明由哪张图支持该条件。"""
+
+    model_config = ConfigDict(extra="forbid")
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+    met: bool
+    evidence_image_id: str | None = None
+    note: Annotated[str, Field(max_length=500)] = ""
+
+
+class DeliveryJointReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    passed: bool
+    primary_image_id: str | None = None
+    candidate_image_ids: list[str] = Field(default_factory=list)
+    condition_checks: list[ConditionCheck] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
 
 
 class DeliveryImageResponseData(BaseModel):
@@ -136,6 +159,8 @@ class DeliveryImageResponseData(BaseModel):
     confidence: Annotated[float, Field(ge=0, le=1)]
     reason_codes: list[DeliveryReasonCode] = Field(default_factory=list)
     image_results: list[DeliveryImageResult] = Field(default_factory=list)
+    # 逐张审核无一张单独通过、触发多图联合复核时才有值。
+    joint_review: DeliveryJointReview | None = None
     summary: Annotated[str, Field(max_length=2000)] = ""
     model_version: Annotated[str, Field(min_length=1, max_length=128)]
     prompt_version: Annotated[str, Field(min_length=1, max_length=128)]
