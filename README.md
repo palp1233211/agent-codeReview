@@ -88,7 +88,9 @@ python -m uvicorn src.delivery_image.api:app --host 0.0.0.0 --port 8000
 
 PHP 调用方逐条请求 `POST /v1/delivery-image/reviews`，使用 `Authorization: Bearer $DELIVERY_IMAGE_SERVICE_TOKEN`。
 
-请求包含 `request_id`、`pno`、`country`、`platform`、`direction` 和 `images`；`recipient_phone` 为可选收件手机号（客户确认类图片需要此参数核对身份）；每个 `images` 元素包含唯一的 `image_id` 和 HTTPS `url`。图片列表至少包含一张，不限制图片数量。`platform` 支持 `TT`、`SHOPEE`、`LAZADA`、`SHEIN`、`TMALL`；`LAZADA` 采用当前生效的新版规则；`direction` 为 `forward`（正向）或 `return`（退件）。为匹配 DNR 规则，调用方应提供平台和方向；缺失时整体结论返回 `uncertain`。服务按数组顺序逐张审核，每次只向模型发送一张图；遇到一张单独满足要求的图片后立即通过整单并停止审核后续图片。响应 `image_results` 逐图包含 `evidence_type`、`policy_match`、`review_status`、`conclusion` 和 `findings`；未审核图片标记为 `skipped`。`findings` 会保留图片中实际识别到的运单号、手机号原文及其比对状态；字段模糊时记录可辨认字符和不确定位置。
+请求包含 `request_id`、`pno`、`country`、`platform`、`direction` 和 `images`；`forward_pno` 为可选正向运单号（退件单与客户沟通时可能使用，TT 退件必须提供）；`recipient_phone` 为可选收件手机号（客户确认类图片需要此参数核对身份）；每个 `images` 元素包含唯一的 `image_id` 和 HTTPS `url`。图片按内容识别格式，支持 JPEG、PNG、GIF、WebP 和 BMP（BMP 由 ffmpeg 转成 PNG 后再送模型；转换失败即该图 `uncertain`）；SVG 是矢量图，不作为证据，会得到明确的"SVG 不支持"原因。图片列表至少包含一张，不限制图片数量。`platform` 支持 `TT`、`SHOPEE`、`LAZADA`、`SHEIN`、`TMALL`；`LAZADA` 采用当前生效的新版规则；`direction` 为 `forward`（正向）或 `return`（退件）。为匹配 DNR 规则，调用方应提供平台和方向；缺失时整体结论返回 `uncertain`。服务按数组顺序逐张审核，每次只向模型发送一张图；遇到一张单独满足要求的图片后立即通过整单并停止审核后续图片。响应 `image_results` 逐图包含 `evidence_type`、`policy_match`、`review_status`、`conclusion` 和 `findings`；未审核图片标记为 `skipped`。
+
+**多图联合复核**：有些举证要求单张图无法满足（LAZADA 现场照 AWB/背景/GPS 三选二、SHOPEE LINE/微信还需客户回复已收到，或现场照与面单照片需要互相关联）。逐张审核结束后，如果没有任何一张单独通过，且存在可联合核验的候选图，服务会自动把候选图（最多 5 张）一起送模型做一次联合复核，模型逐项输出 `condition_checks` 并指明每个条件由哪张图支持；通过与否由代码裁决：校验引用的图片存在、运单号/手机号比对一致、满足规则表阈值。响应的 `joint_review` 记录主证据、候选图、逐项核对和未通过原因。`conditional` 状态的图片永远不能单张通过；TT 和退件方向的客服回访录音需要录屏加录音，图片接口无法满足，不会触发联合复核。规则表见 `src/delivery_image/policy.py`。`findings` 会保留图片中实际识别到的运单号、手机号原文及其比对状态；字段模糊时记录可辨认字符和不确定位置。
 
 录音和录屏使用独立接口 `POST /v1/delivery-conversation/reviews`，不能把视频 URL 放入图片的 `images` 数组。请求体示例：
 
@@ -98,6 +100,8 @@ PHP 调用方逐条请求 `POST /v1/delivery-image/reviews`，使用 `Authorizat
   "pno": "THT01435EPYZ56Z",
   "country": "TH",
   "platform": "SHOPEE",
+  "direction": "forward",
+  "recipient_phone": "0991812244",
   "media_files": [
     {
       "media_id": "media-1",
@@ -108,9 +112,15 @@ PHP 调用方逐条请求 `POST /v1/delivery-image/reviews`，使用 `Authorizat
 }
 ```
 
-`media_type` 为 `audio` 或 `video`。服务从传入的 HTTPS 媒体地址下载文件；若为视频，先在服务端提取音轨并转换为 16 kHz 单声道 WAV，再按 `qwen-audio-3.1-asr-flash-filetrans` 示例流程上传到 Qwen 临时 OSS，提交带说话人分离和目标运单热词的异步转写任务并轮询结果。随后由 Qwen `qwen-plus` 分析说话人角色、目标运单号和客户收货表达；只有号码匹配且客户本人明确说已收到包裹时才返回 `supports_delivery`。响应逐项返回转写、识别到的号码、匹配状态、客户收货原话和时间点；说话人不明、号码听不清或模型失败时返回 `uncertain`。该流程仅处理 5 分钟以内的媒体，容器需要安装 `ffmpeg`/`ffprobe`。`DELIVERY_AUDIO_FILETRANS_MODEL` 默认是 `qwen-audio-3.1-asr-flash-filetrans`，`DELIVERY_AUDIO_BASE_URL` 默认是 `https://maas.qianwenaiapi.com/api/v1`；语义审核由 `DELIVERY_CONVERSATION_ANALYSIS_MODEL`、`DELIVERY_CONVERSATION_ANALYSIS_BASE_URL` 和 `DELIVERY_CONVERSATION_ANALYSIS_API_MODE` 控制，默认使用 `qwen-plus`、百炼 OpenAI 兼容接口和 Chat Completions。两个阶段的专用 Token 留空时都会读取 `DASHSCOPE_API_KEY`，再回退到 `DELIVERY_IMAGE_API_TOKEN`。媒体下载默认最多等待 90 秒，可通过 `DELIVERY_MEDIA_DOWNLOAD_TIMEOUT` 调整；每个请求最多20个媒体文件，源文件及提取后的音频各自不超过24 MiB；Qwen 转写默认最多等待 600 秒，每单默认总时限 900 秒，可分别通过 `DELIVERY_AUDIO_TIMEOUT` 和 `DELIVERY_CONVERSATION_TOTAL_TIMEOUT` 调整。
+`media_type` 为 `audio` 或 `video`。服务从传入的 HTTPS 媒体地址下载文件；若为视频，先在服务端提取音轨并转换为 16 kHz 单声道 WAV，再调用 `qwen-audio-3.1-asr-flash` 同步接口，启用 `speaker_diarization_enabled`，携带目标运单热词并保留说话人标签。随后由图片审核配置的模型分析说话人角色、目标运单号和客户收货表达；只有号码匹配且客户本人明确说已收到包裹时才返回 `supports_delivery`。响应逐项返回 `evidence_type`（`courier_call_video`/`courier_call_audio`）、`policy_match`（按平台和方向准入矩阵由代码给出：`accepted`、`rejected`、`conditional`，缺平台或方向为 `unknown`；TT 退件视频未传 `forward_pno` 时为 `conditional`）、转写、识别到的号码、匹配状态、客户收货原话和时间点，`evidence_type`/`policy_match` 与图片结果字段对齐；说话人不明、号码听不清或模型失败时返回 `uncertain`。该流程仅处理 5 分钟以内的媒体，容器需要安装 `ffmpeg`/`ffprobe`。按文件内容（而非扩展名）识别格式，音频支持 WAV、MP3、FLAC、OGG、AMR（NB/WB），视频支持 MP4/MOV/3GP（`ftyp` 容器）、WebM/MKV 和 AVI；其他格式返回 `uncertain`。`DELIVERY_AUDIO_MODEL` 默认是 `qwen-audio-3.1-asr-flash`，`DELIVERY_AUDIO_BASE_URL` 默认是 `https://maas.qianwenaiapi.com/api/v1`；语义审核复用图片审核的模型、API 地址、Token 和 API 模式；转写 Token 仍由 Qwen ASR 配置提供。媒体下载默认最多等待 90 秒，可通过 `DELIVERY_MEDIA_DOWNLOAD_TIMEOUT` 调整；每个请求最多20个媒体文件，源文件及提取后的音频各自不超过24 MiB；Qwen 转写默认最多等待 600 秒，每单默认总时限 900 秒，可分别通过 `DELIVERY_AUDIO_TIMEOUT` 和 `DELIVERY_CONVERSATION_TOTAL_TIMEOUT` 调整。
 
 音视频接口的 `platform` 与图片接口使用相同代码，支持 `TT`、`SHOPEE`、`LAZADA`、`SHEIN`、`TMALL`，大小写不敏感。`LAZADA` 使用当前生效的新版规则；通话视频在除 `LAZADA` 外的平台可采纳，通话音频仅在 `SHOPEE`、`SHEIN`、`TMALL` 可采纳。省略 `platform` 时仍处理转写，但不会自动判定妥投。
+
+音视频接口同样接收 `direction`（`forward` 正向 / `return` 退件），取值与图片接口一致；缺失 `direction` 返回 `uncertain`（仍会转写并如实记录号码和收货表达）。准入矩阵以飞书《DNR举证要求》为准，按方向区分：
+- 正向：电话视频除 `LAZADA` 外可采纳，电话音频仅 `SHOPEE`/`SHEIN`/`TMALL` 可采纳（`LAZADA` 执行 0910 新规则）。
+- 退件：`LAZADA` 沿用原规则，不适用 0910 修改。电话视频五个平台均可采纳（`TT` 须按正向单号沟通），电话音频除 `TT` 外可采纳。
+
+退件单与客户沟通时可能使用正向运单号，音视频和图片接口都可传可选参数 `forward_pno`：退件方向下通话/截图中的运单号与 `pno` 或 `forward_pno` 任一完整一致即视为运单一致，`forward_pno` 同时作为 ASR 热词；`TT` 退件的电话视频、短信、WhatsApp 必须与 `forward_pno` 一致，未传 `forward_pno` 时返回 `uncertain`。正向方向不使用 `forward_pno`。
 
 本地视频如果只审核对话，可先在本机提取音轨并压缩成单声道 MP3，再上传到审核容器可访问的 HTTPS 对象存储，把返回的直连地址作为 `media_files[].url`，并将 `media_type` 设为 `audio`。例如：
 
@@ -119,6 +129,10 @@ ffmpeg -hide_banner -i "$HOME/Downloads/call.mp4" -map 0:a:0 -vn -ac 1 -ar 16000
 ```
 
 不要把本机路径当作 URL 传入；服务运行在容器中，无法直接读取宿主机文件。对象存储域名必须在 `DELIVERY_IMAGE_ALLOWED_HOSTS` 中，音频需不超过 24 MiB、时长不超过 5 分钟。只上传音频后，审核无法检查视频画面中的号码或其他视觉信息。
+
+视频手机号识别复用图片审核的模型、地址及 Token 配置，从已下载视频的全程均匀抽帧（约每 4 秒一帧，至少 3 帧、至多 6 帧，首尾必取），一次发送给视觉模型。通话界面可能在任意时刻出现，所以不只取首、中、尾。比对规则：以画面中完整可读的通话对方号码为准；转场或遮挡造成的不可读帧，只要可见数字与完整号码不矛盾就忽略，矛盾或出现多个不同完整号码则为 `uncertain`。请求可传 `recipient_phone`（与图片接口同名）。每个 `media_results` 返回 `detected_phone_numbers`（实际读到的原文）、`phone_observations`（画面时间点、通话对方标记、可读性）、`phone_sample_times` 和 `phone_match`。泰国本地号码与 `+66` 国际格式可归一化比对；其他国家当前只比较完整国际号码。
+
+`phone_match` 为 `matched`、`mismatch`、`uncertain` 或纯音频的 `not_applicable`。遮挡、缺少本单手机号、多个不同通话号码、未识别到通话对方号码均无法核验；不会用参数补全识别原文。有限采样可能错过短暂出现的号码。此阶段手机号结果独立输出，尚未接入整单 `decision` 的通过条件；画面识别失败会保留已有转写结果。
 
 ## 服务器部署
 
@@ -422,3 +436,7 @@ custom_prompt: |
 ```bash
 python cli.py yunxiao-mr -r 3865544 -m 42 --business mobile
 ```
+
+音视频对话语义分析现直接复用图片审核的 `DELIVERY_IMAGE_MODEL`、`DELIVERY_IMAGE_BASE_URL`、`DELIVERY_IMAGE_API_TOKEN` 和 `DELIVERY_IMAGE_API_MODE`；原 `DELIVERY_CONVERSATION_ANALYSIS_*` 配置不再控制该步骤。响应 `analysis_model` 返回实际使用的图片模型名。语音转写仍使用独立的 Qwen ASR 配置。
+
+音视频下载单次读取等待上限为 30 秒；连接失败、连接超时、读取失败或读取超时最多重试两次（共三次尝试），退避为 0.5 秒、1 秒。所有尝试共用 `DELIVERY_MEDIA_DOWNLOAD_TIMEOUT`，并受整单剩余时限约束；HTTP 状态错误、文件过大和格式错误不重试。
