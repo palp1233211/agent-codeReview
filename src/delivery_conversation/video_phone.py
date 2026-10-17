@@ -10,26 +10,13 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from src.delivery_image.phone import normalize_phone
+
 from .schemas import PhoneMatch, PhoneObservation
 
 MIN_PHONE_FRAMES = 3
 MAX_PHONE_FRAMES = 6
 PHONE_FRAME_INTERVAL_SECONDS = 4
-
-
-def normalize_phone(raw: str, country: str) -> str | None:
-    """不补全遮挡数字；泰国本地号码转换为国际格式，其他国家仅支持完整国际号码。"""
-    value = "".join(str(unicodedata.decimal(c)) if c.isdecimal() else c for c in raw)
-    value = re.sub(r"[\s()\-]", "", value)
-    if value.startswith("00"):
-        value = "+" + value[2:]
-    if country.upper() == "TH":
-        if re.fullmatch(r"0[1-9][0-9]{8}", value):
-            return "+66" + value[1:]
-        if re.fullmatch(r"\+?66[1-9][0-9]{8}", value):
-            return "+" + value.lstrip("+")
-        return None
-    return value if re.fullmatch(r"\+[1-9][0-9]{7,14}", value) else None
 
 
 _WILDCARDS = "?*•xX_"

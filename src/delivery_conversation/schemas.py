@@ -73,12 +73,10 @@ class ConversationEvidenceRequest(BaseModel):
         return value
 
     def accepted_waybills(self) -> list[str]:
-        """通话中可作为本单运单号核对的号码：退件可用正向单号；TT 退件只认正向单号。"""
-        if self.direction != DeliveryDirection.RETURN:
-            return [self.pno]
-        if self.platform == DeliveryPlatform.TT:
+        """通话中可作为本单运单号核对的号码：只有 TT 退件按正向单号沟通，只认 forward_pno；其余都是 pno。"""
+        if self.direction == DeliveryDirection.RETURN and self.platform == DeliveryPlatform.TT:
             return [self.forward_pno] if self.forward_pno else []
-        return [self.pno, *([self.forward_pno] if self.forward_pno else [])]
+        return [self.pno]
 
     @field_validator("media_files")
     @classmethod

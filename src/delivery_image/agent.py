@@ -21,11 +21,12 @@ from src.review_prompt_loader import load_review_prompt
 from .config import DeliveryImageConfig
 from .policy import (
     PHONE_EVIDENCE_TYPES,
-    TT_RETURN_FORWARD_PNO_TYPES,
     describe_conditions,
     get_rule,
+    mark_unverifiable_conditions,
     verify_joint_review,
 )
+from .policy_matrix import EPOD_ONLY_TYPES, expected_policy_match
 from .schemas import (
     ConditionCheck,
     DeliveryDecision,
@@ -41,6 +42,9 @@ from .schemas import (
     ImageReviewStatus,
     PolicyMatch,
 )
+from .epod import EPOD_TYPES, classify_epod
+from .phone import phone_confirmed
+from .waybill import TT_RETURN_FORWARD_PNO_TYPES, accepted_waybills, waybill_confirmed
 
 
 # BITMAPCOREHEADER、INFOHEADER、V2~V5 头的字节数。
@@ -230,7 +234,7 @@ class DeliveryImageAgent:
 
         def is_primary(result: DeliveryImageResult) -> bool:
             rule = get_rule(request.platform, request.direction, result.evidence_type)
-            return rule is not None and rule.joint_possible
+            return rule is not None
 
         pool = [
             result for result in image_results
@@ -289,7 +293,6 @@ class DeliveryImageAgent:
             f"- 以 {candidate.image_id}（{candidate.evidence_type.value}）为主证据：{describe_conditions(rule)}"
             for candidate in candidates
             if (rule := get_rule(request.platform, request.direction, candidate.evidence_type)) is not None
-            and rule.joint_possible
         )
         candidate_notes = "\n".join(
             f"- image_id={candidate.image_id}；证据类型={candidate.evidence_type.value}；"
@@ -331,6 +334,8 @@ class DeliveryImageAgent:
             get_rule(request.platform, request.direction, primary.evidence_type)
             if primary is not None else None
         )
+        if rule is not None:
+            checks = mark_unverifiable_conditions(rule, checks)
         if primary is None:
             reasons.append("联合复核没有选出有效的主证据图片。")
         elif rule is None:
@@ -342,6 +347,16 @@ class DeliveryImageAgent:
                 checks=checks,
                 images=by_id,
                 recipient_phone_required=request.recipient_phone is not None,
+                waybill_targets=lambda evidence_type: accepted_waybills(
+                    pno=request.pno,
+                    forward_pno=request.forward_pno,
+                    platform=request.platform,
+                    direction=request.direction,
+                    evidence_type=evidence_type,
+                ),
+                phone_confirmed_by_code=lambda image: phone_confirmed(
+                    image, request.recipient_phone, request.country,
+                ),
             ))
         if payload.get("decision") != DeliveryDecision.CORRECT.value:
             reasons.append("联合复核的模型结论不是 correct_delivery。")
@@ -527,6 +542,7 @@ class DeliveryImageAgent:
             f"平台：{platform}\n"
             f"业务方向：{direction}\n"
             f"本单收件手机号 recipient_phone：{recipient_phone}\n"
+            f"本图是否系统 EPOD 图片（非用户上传）：{'是' if request.images[0].is_epod else '否'}\n"
             f"{prompt}"
         )
         return self._call_model(request, user_text, deadline, image_data_url)
@@ -677,6 +693,9 @@ class DeliveryImageAgent:
     ) -> DeliveryImageResponseData:
         # 缺少规则上下文或单图结果不满足结构化通过条件时，不允许短路整单。
         notes: list[str] = []
+        epod_ids = {image.image_id for image in request.images if image.is_epod}
+        result = DeliveryImageAgent._apply_epod_type(result, epod_ids, request)
+        result = DeliveryImageAgent._apply_policy_matrix(result, epod_ids)
         if result.platform is None or result.direction is None:
             missing = []
             if result.platform is None:
@@ -713,12 +732,20 @@ class DeliveryImageAgent:
 
             if result.decision == DeliveryDecision.CORRECT and waybill_finding and "与目标 pno 比对：不一致" in waybill_finding:
                 notes.append(f"图片 {image.image_id} 识别出的运单号与目标 pno 不一致。")
+            if result.decision == DeliveryDecision.CORRECT and not DeliveryImageAgent._waybill_confirmed(image, request):
+                notes.append(
+                    f"图片 {image.image_id} 抄录的运单号未能由代码核对为与目标运单号完整一致，不能单图通过。"
+                )
             if result.decision == DeliveryDecision.CORRECT and phone_finding and "与 recipient_phone 比对：不一致" in phone_finding:
                 notes.append(f"图片 {image.image_id} 识别出的手机号与 recipient_phone 不一致。")
-            if result.decision == DeliveryDecision.CORRECT and image.evidence_type in phone_evidence_types and phone_finding and not any(
-                marker in phone_finding for marker in ("与 recipient_phone 比对：一致",)
+            if (
+                result.decision == DeliveryDecision.CORRECT
+                and image.evidence_type in phone_evidence_types
+                and not phone_confirmed(image, request.recipient_phone, request.country)
             ):
-                notes.append(f"图片 {image.image_id} 的客户确认手机号没有与 recipient_phone 明确核对一致。")
+                notes.append(
+                    f"图片 {image.image_id} 抄录的手机号未能由代码核对为与 recipient_phone 一致，不能单图通过。"
+                )
 
         if result.decision == DeliveryDecision.CORRECT:
             # conditional 的条件无法由单图自述确认：只有 accepted 才能单图通过，
@@ -747,6 +774,63 @@ class DeliveryImageAgent:
                 }
             )
         return result
+
+    @staticmethod
+    def _apply_epod_type(
+        result: DeliveryImageResponseData,
+        epod_ids: set[str],
+        request: DeliveryImageRequest,
+    ) -> DeliveryImageResponseData:
+        """系统 EPOD 图片是原合格 EPOD 还是补派照，由代码按水印拍照时间与 DNR 创建时间判定，不采信模型自判。"""
+        updated: list[DeliveryImageResult] = []
+        for image in result.image_results:
+            if image.image_id not in epod_ids or image.evidence_type not in EPOD_TYPES:
+                updated.append(image)
+                continue
+            kind = classify_epod(image, request.dnr_created_at)
+            updated.append(image.model_copy(update={
+                "evidence_type": kind.evidence_type,
+                "findings": [*image.findings, f"EPOD 类型由代码判定：{kind.note}"],
+            }))
+        return result.model_copy(update={"image_results": updated})
+
+    @staticmethod
+    def _apply_policy_matrix(
+        result: DeliveryImageResponseData,
+        epod_ids: set[str],
+    ) -> DeliveryImageResponseData:
+        """规则状态以代码准入矩阵为准，模型自述的 policy_match 与之不符时校正并留痕。"""
+        corrected: list[DeliveryImageResult] = []
+        for image in result.image_results:
+            is_epod = image.image_id in epod_ids
+            expected = expected_policy_match(
+                result.platform, result.direction, image.evidence_type, is_epod=is_epod,
+            )
+            if expected is None or expected == image.policy_match:
+                corrected.append(image)
+                continue
+            findings = [
+                *image.findings,
+                f"规则状态由代码按平台/方向准入矩阵校正：模型判为 {image.policy_match.value}，"
+                f"矩阵结果为 {expected.value}。",
+            ]
+            if image.evidence_type in EPOD_ONLY_TYPES and not is_epod:
+                findings.append("原合格 EPOD、补派照只适用于系统 EPOD 图片（请求中 is_epod=true），用户上传的图片不适用。")
+            corrected.append(image.model_copy(update={"policy_match": expected, "findings": findings}))
+        return result.model_copy(update={"image_results": corrected})
+
+    @staticmethod
+    def _waybill_confirmed(image: DeliveryImageResult, request: DeliveryImageRequest) -> bool:
+        return waybill_confirmed(
+            image,
+            accepted_waybills(
+                pno=request.pno,
+                forward_pno=request.forward_pno,
+                platform=request.platform,
+                direction=request.direction,
+                evidence_type=image.evidence_type,
+            ),
+        )
 
     def _uncertain_result(self, request: DeliveryImageRequest, duration_ms: int) -> DeliveryImageResponseData:
         return DeliveryImageResponseData(

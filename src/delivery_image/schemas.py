@@ -1,5 +1,6 @@
 """妥投图片审核 Agent 的输入输出契约。"""
 
+from datetime import datetime
 from enum import Enum
 from typing import Annotated
 from urllib.parse import urlparse
@@ -77,6 +78,8 @@ class DeliveryImage(BaseModel):
     model_config = ConfigDict(extra="forbid")
     image_id: Annotated[str, Field(min_length=1, max_length=128)]
     url: Annotated[str, Field(min_length=1, max_length=2048)]
+    # 系统 EPOD 图片（非用户上传）。1.5 的“原合格 EPOD 包裹照片”“投诉后补派照”只适用于这类图片。
+    is_epod: bool = False
 
     @field_validator("url")
     @classmethod
@@ -98,6 +101,8 @@ class DeliveryImageRequest(BaseModel):
     forward_pno: Annotated[str | None, Field(min_length=1, max_length=128)] = None
     # 收件手机号由业务调用方提供，供模型从聊天截图中识别后进行身份核对。
     recipient_phone: Annotated[str | None, Field(min_length=5, max_length=32)] = None
+    # DNR 创建时间；EPOD 图片的拍照时间水印晚于它即为补派照。未带时区按泰国时间（UTC+7）处理。
+    dnr_created_at: datetime | None = None
     # 图片数量不设上限；Agent 会按顺序逐张审核，满足条件后提前停止。
     images: Annotated[list[DeliveryImage], Field(min_length=1)]
 

@@ -66,6 +66,10 @@ class ConversationEvidenceAgent:
         results: list[ConversationMediaResult] = []
         try:
             for media in request.media_files:
+                if media.media_type == ConversationMediaType.AUDIO:
+                    # 纯音频一律不采纳：不下载、不转写、不调用模型，只记录原因。
+                    results.append(self._skipped_audio_result(media))
+                    continue
                 remaining_seconds = deadline - time.monotonic()
                 if remaining_seconds <= 0:
                     results.append(
@@ -188,9 +192,6 @@ class ConversationEvidenceAgent:
                         self._merge_phone_review_result(result, phone_result)
                     results.append(result)
 
-                # 音频没有视频画面；只补充“不适用”标记，不触发手机号识别。
-                if media_bytes is not None and media.media_type == ConversationMediaType.AUDIO:
-                    await self._append_phone_review(results[-1], request, media_bytes, suffix, deadline)
 
             for result in results:
                 result.evidence_type, result.policy_match = self._policy_fields(request, result.media_type)
@@ -206,7 +207,11 @@ class ConversationEvidenceAgent:
             elif (
                 request.platform is None
                 or request.direction is None
-                or (self._requires_forward_waybill(request) and not request.forward_pno)
+                or (
+                    self._requires_forward_waybill(request)
+                    and not request.forward_pno
+                    and any(result.media_type == ConversationMediaType.VIDEO for result in results)
+                )
                 or any(self._requires_manual_review(result) for result in results)
             ):
                 decision = ConversationDecision.UNCERTAIN
@@ -215,7 +220,10 @@ class ConversationEvidenceAgent:
             else:
                 decision = ConversationDecision.NOT_CONFIRMED
                 confidence = max((result.confidence for result in results), default=0.0)
-                summary = "音视频对话未能证明客户收到与目标运单号对应的包裹。"
+                if all(result.media_type == ConversationMediaType.AUDIO for result in results):
+                    summary = "纯音频无法核验询问客户电话号码，不作为妥投证据，未能证明客户收到包裹。"
+                else:
+                    summary = "音视频对话未能证明客户收到与目标运单号对应的包裹。"
 
             return ConversationEvidenceData(
                 request_id=request.request_id,
@@ -236,15 +244,24 @@ class ConversationEvidenceAgent:
             )
             raise
 
+    @staticmethod
+    def _skipped_audio_result(media: Any) -> ConversationMediaResult:
+        """纯音频没有画面，无法核验询问客户电话号码，业务确认一律不采纳，因此跳过全部处理。"""
+        return ConversationMediaResult(
+            media_id=media.media_id,
+            media_type=media.media_type,
+            waybill_match=WaybillMatch.UNCERTAIN,
+            customer_receipt_status=CustomerReceiptStatus.UNCLEAR,
+            phone_match=PhoneMatch.NOT_APPLICABLE,
+            conversation_analysis_skipped=True,
+            findings=["纯音频没有画面，无法核验询问客户电话号码，不作为妥投证据，已跳过下载与转写。"],
+        )
+
     async def _append_phone_review(
         self, result: ConversationMediaResult, request: ConversationEvidenceRequest,
         media_bytes: bytes, suffix: str, deadline: float,
     ) -> None:
         """单独记录画面识别失败，避免抹去已经成功得到的转写与客户收货原话。"""
-        if result.media_type == ConversationMediaType.AUDIO:
-            result.phone_match = PhoneMatch.NOT_APPLICABLE
-            result.findings.append("纯音频没有画面，未执行画面手机号识别。")
-            return
         started = time.monotonic()
         budget = min(self.config.timeout_seconds, deadline - started)
         try:
@@ -306,7 +323,9 @@ class ConversationEvidenceAgent:
 
     @staticmethod
     def _requires_manual_review(result: ConversationMediaResult) -> bool:
-        """手机号不匹配导致跳过分析时，不把未执行的分析误算成信息不足。"""
+        """手机号不匹配导致跳过分析时，不把未执行的分析误算成信息不足；纯音频不采纳，补充信息也不会改变结论。"""
+        if result.media_type == ConversationMediaType.AUDIO:
+            return False
         if (
             result.conversation_analysis_skipped
             and result.media_type == ConversationMediaType.VIDEO
@@ -926,20 +945,15 @@ class ConversationEvidenceAgent:
         media_type: ConversationMediaType,
         direction: DeliveryDirection = DeliveryDirection.FORWARD,
     ) -> bool:
-        """应用《DNR举证要求》文档的准入矩阵；退件沿用 LAZADA 原规则（不适用 0910 修改）。"""
-        if platform is None:
+        """应用《DNR举证要求》文档的准入矩阵；LAZADA 与其他平台一样，只按对应方向的要求判断。
+
+        纯音频没有画面，无法核验「询问客户电话号码一致」，业务确认一律按不采纳处理。
+        """
+        if platform is None or media_type == ConversationMediaType.AUDIO:
             return False
         if direction == DeliveryDirection.RETURN:
-            if media_type == ConversationMediaType.VIDEO:
-                return True
-            return platform != DeliveryPlatform.TT
-        if media_type == ConversationMediaType.VIDEO:
-            return platform != DeliveryPlatform.LAZADA
-        return platform in {
-            DeliveryPlatform.SHOPEE,
-            DeliveryPlatform.SHEIN,
-            DeliveryPlatform.TMALL,
-        }
+            return True
+        return platform != DeliveryPlatform.LAZADA
 
     def _uncertain_media_result(
         self,
