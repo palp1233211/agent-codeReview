@@ -16,9 +16,9 @@ prompt: |
   4. 运单号必须与 pno 完整一致（只有 TT 退件的短信、WhatsApp 以 forward_pno 为准），手机号按国家码规则与 recipient_phone 比对；模糊、遮挡、只见部分号码都不算一致。
      不要重新宣称单图审核中已经记录为"不一致"的号码一致。
   5. 条件无法由图片证明时（例如要求录屏加录音），不要因为有截图就判满足。
-  6. awb_matches_pno 指图片内包裹上的运单号（pno）与目标 pno 完整一致；多张候选图中只要有一张能判定一致即可，evidence_image_id 填该张。
+  6. awb_matches_pno 指图片内包裹面单上的运单号（pno）与目标 pno 完整一致（水印上的运单号是系统标记，不算，单图审核记录里“运单号来源”不是“包裹面单”的图片不能作为 awb_matches_pno 的证据）；多张候选图中只要有一张能判定一致即可，evidence_image_id 填该张。
      background_matches 指包裹所在背景能体现收件人最终交付地点（如收件人门牌号、居住环境）。
-  7. gps_within_1km 暂不核验：met 一律填 false，evidence_image_id 为 null，note 写“待参数核验”，不要根据图片水印判断；其余条件满足规则要求的数量即可通过。
+  7. gps_within_1km 由系统依据请求里的妥投定位距离核定，结果见“本次联合复核输入”里的“系统已核定 gps_within_1km”：condition_checks 里 met 一律填 false，evidence_image_id 为 null，note 写“由系统核定”，不要根据图片水印判断；但给出 decision 时，系统核定为“满足”的 GPS 要和你核对出的其他条件一起计入已满足的条件数（例如要求三项满足两项，系统已核定 GPS 满足、你核对出背景满足，就是已满足两项）。
   8. customer_reply_received：客户回复已收到出现在主证据同一张截图里也算满足，evidence_image_id 可以填主证据本身。
   {shared_customer_confirmation_rules}
 

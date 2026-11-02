@@ -101,8 +101,13 @@ class DeliveryImageRequest(BaseModel):
     forward_pno: Annotated[str | None, Field(min_length=1, max_length=128)] = None
     # 收件手机号由业务调用方提供，供模型从聊天截图中识别后进行身份核对。
     recipient_phone: Annotated[str | None, Field(min_length=5, max_length=32)] = None
+    # 收件地址（含门牌号）。门牌号由代码从中提取，只把门牌号交给模型抄录比对；提取不到门牌号时不核对。
+    recipient_address: Annotated[str | None, Field(max_length=500)] = None
     # DNR 创建时间；EPOD 图片的拍照时间水印晚于它即为补派照。未带时区按泰国时间（UTC+7）处理。
     dnr_created_at: datetime | None = None
+    # 快递员妥投时的定位到收件地址的距离（米），由调用方查好后传入；用来核对「GPS 在收件人 1 公里内」。
+    # 不传表示没有查到，该条件按未核验处理。
+    delivery_distance_m: Annotated[float | None, Field(ge=0, le=1_000_000)] = None
     # 图片数量不设上限；Agent 会按顺序逐张审核，满足条件后提前停止。
     images: Annotated[list[DeliveryImage], Field(min_length=1)]
 

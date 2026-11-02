@@ -22,11 +22,12 @@ from .config import DeliveryImageConfig
 from .policy import (
     PHONE_EVIDENCE_TYPES,
     describe_conditions,
+    gps_verdict_line,
     get_rule,
     mark_unverifiable_conditions,
     verify_joint_review,
 )
-from .policy_matrix import EPOD_ONLY_TYPES, expected_policy_match
+from .policy_matrix import EPOD_ONLY_TYPES, epod_can_pass, expected_policy_match
 from .schemas import (
     ConditionCheck,
     DeliveryDecision,
@@ -43,8 +44,18 @@ from .schemas import (
     PolicyMatch,
 )
 from .epod import EPOD_TYPES, classify_epod
+from .log_context import log_context, set_log_context
+from .house_number import HouseNumberStatus, house_number_status
 from .phone import phone_confirmed
-from .waybill import TT_RETURN_FORWARD_PNO_TYPES, accepted_waybills, waybill_confirmed
+from .usage_log import describe_data_urls, log_usage
+from .waybill import (
+    COURIER_TEXT_SOURCE,
+    TT_RETURN_FORWARD_PNO_TYPES,
+    accepted_waybills,
+    required_waybill_source,
+    waybill_confirmed,
+    waybill_source,
+)
 
 
 # BITMAPCOREHEADER、INFOHEADER、V2~V5 头的字节数。
@@ -77,6 +88,10 @@ class DeliveryImageAgent:
         joint_prompt: str | None = None,
     ) -> DeliveryImageResponseData:
         started = time.monotonic()
+        set_log_context(request.request_id, request.pno)
+        if request.images and all(image.is_epod for image in request.images) \
+                and epod_can_pass(request.platform, request.direction) is False:
+            return self._reject_epod_by_policy(request, started)
         # 每张图片都有独立模型超时预算，另留一次联合复核预算；整单预算按图片数扩展，
         # 避免前序图片耗尽后续图片的时间。
         deadline = started + self.config.timeout_seconds * (len(request.images) + 1) + 5
@@ -113,6 +128,7 @@ class DeliveryImageAgent:
                     image_review = self._uncertain_result(
                         one_image_request,
                         self._duration_ms(started),
+                        error_type=type(exc).__name__,
                     )
 
                 image_results.extend(image_review.image_results)
@@ -181,7 +197,36 @@ class DeliveryImageAgent:
                 type(exc).__name__,
                 str(exc)[:500],
             )
-            return self._uncertain_result(request, self._duration_ms(started))
+            return self._uncertain_result(request, self._duration_ms(started), error_type=type(exc).__name__)
+
+    def _reject_epod_by_policy(self, request: DeliveryImageRequest, started: float) -> DeliveryImageResponseData:
+        """全是系统 EPOD 图、且准入矩阵不认可该平台/方向的 EPOD 图时，结论由代码直接给出：不下载图片、不调模型。"""
+        platform, direction = request.platform.value, request.direction.value
+        note = (
+            f"{platform} {direction} 的准入矩阵不认可系统 EPOD 图片（原合格 EPOD 包裹照、补派照均为 rejected），"
+            "按规则判不通过，未调用模型审核。"
+        )
+        logging.getLogger(__name__).info(
+            "delivery image epod rejected by policy request_id=%s platform=%s direction=%s images=%s",
+            request.request_id, platform, direction, len(request.images),
+        )
+        return self._build_response(
+            request=request,
+            decision=DeliveryDecision.INCORRECT,
+            confidence=1.0,
+            reason_codes=[],
+            image_results=[
+                DeliveryImageResult(
+                    image_id=image.image_id,
+                    policy_match=PolicyMatch.REJECTED,
+                    conclusion=DeliveryImageConclusion.INVALID,
+                    findings=[note],
+                )
+                for image in request.images
+            ],
+            summary=f"{note} 共 {len(request.images)} 张 EPOD 图。",
+            started=started,
+        )
 
     def _build_response(
         self,
@@ -290,7 +335,7 @@ class DeliveryImageAgent:
         deadline: float,
     ) -> tuple[DeliveryJointReview, float, str]:
         rules_text = "\n".join(
-            f"- 以 {candidate.image_id}（{candidate.evidence_type.value}）为主证据：{describe_conditions(rule)}"
+            f"- 以 {candidate.image_id}（{candidate.evidence_type.value}）为主证据：{describe_conditions(rule, request.delivery_distance_m)}"
             for candidate in candidates
             if (rule := get_rule(request.platform, request.direction, candidate.evidence_type)) is not None
         )
@@ -302,15 +347,18 @@ class DeliveryImageAgent:
             for candidate in candidates
         )
         recipient_phone = request.recipient_phone or "未提供（不得据此确认手机号一致）"
+        # 同单图提示词：固定部分在前、每单变化的参数和候选记录在后，利于模型服务的前缀缓存
         user_text = (
+            f"{joint_prompt.replace('{policy_conditions}', rules_text)}\n\n"
+            "【本次联合复核输入】\n"
             f"当前国家：{request.country}\n"
             f"目标运单号 pno：{request.pno}\n"
             f"正向运单号 forward_pno：{request.forward_pno or '未提供'}\n"
             f"平台：{request.platform.value}\n"
             f"业务方向：{request.direction.value}\n"
             f"本单收件手机号 recipient_phone：{recipient_phone}\n"
-            f"候选图片的单图审核记录：\n{candidate_notes}\n"
-            f"{joint_prompt.replace('{policy_conditions}', rules_text)}"
+            f"{gps_verdict_line(request.delivery_distance_m)}\n"
+            f"候选图片的单图审核记录：\n{candidate_notes}"
         )
         raw_text = self._call_joint_model(
             user_text,
@@ -335,7 +383,7 @@ class DeliveryImageAgent:
             if primary is not None else None
         )
         if rule is not None:
-            checks = mark_unverifiable_conditions(rule, checks)
+            checks = mark_unverifiable_conditions(rule, checks, request.delivery_distance_m)
         if primary is None:
             reasons.append("联合复核没有选出有效的主证据图片。")
         elif rule is None:
@@ -357,6 +405,8 @@ class DeliveryImageAgent:
                 phone_confirmed_by_code=lambda image: phone_confirmed(
                     image, request.recipient_phone, request.country,
                 ),
+                gps_distance_m=request.delivery_distance_m,
+                address_provided=request.recipient_address is not None,
             ))
         if payload.get("decision") != DeliveryDecision.CORRECT.value:
             reasons.append("联合复核的模型结论不是 correct_delivery。")
@@ -386,6 +436,7 @@ class DeliveryImageAgent:
         if remaining_seconds <= 0:
             raise TimeoutError("妥投证据审核超过总超时限制")
         timeout_seconds = min(self.config.timeout_seconds, remaining_seconds)
+        call_started = time.monotonic()
         if self.config.api_mode == "responses":
             content: list[dict[str, Any]] = [{"type": "input_text", "text": user_text}]
             for image_id, data_url in images:
@@ -396,6 +447,7 @@ class DeliveryImageAgent:
                 input=[{"role": "user", "content": content}],
                 timeout=timeout_seconds,
             )
+            self._log_joint_usage(response, images, call_started)
             return str(getattr(response, "output_text", "") or "")
 
         chat_content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
@@ -407,14 +459,29 @@ class DeliveryImageAgent:
             messages=[{"role": "user", "content": chat_content}],
             timeout=timeout_seconds,
         )
+        self._log_joint_usage(response, images, call_started)
         return str(response.choices[0].message.content or "")
+
+    def _log_joint_usage(self, response: Any, images: list[tuple[str, str]], started: float) -> None:
+        try:
+            details = dict(pair.split("=", 1) for pair in describe_data_urls([url for _, url in images]).split(" "))
+            log_usage("joint", response, self.config.model, self._duration_ms(started), images=len(images), **details)
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug("usage log failed", exc_info=True)
 
     def _validate_image(self, image: Any) -> None:
         parsed = urlparse(image.url)
         hostname = (parsed.hostname or "").lower().rstrip(".")
         if parsed.username or parsed.password or parsed.port:
+            logging.getLogger(__name__).warning(
+                "delivery image url rejected reason=userinfo_or_port %s host=%s", log_context(), hostname or "(empty)"
+            )
             raise ValueError("图片 URL 不得包含用户信息或端口")
         if hostname not in self.config.allowed_hosts:
+            # 只记录域名，不记录完整地址（可能带签名参数）
+            logging.getLogger(__name__).warning(
+                "delivery image url rejected reason=host_not_allowed %s host=%s", log_context(), hostname or "(empty)"
+            )
             raise ValueError("图片 URL 主机不在允许列表")
         try:
             address = ipaddress.ip_address(hostname)
@@ -462,7 +529,8 @@ class DeliveryImageAgent:
                 mime_type = "image/png"
 
             logging.getLogger(__name__).info(
-                "delivery image downloaded image_id=%s mime_type=%s bytes=%s",
+                "delivery image downloaded %s image_id=%s mime_type=%s bytes=%s",
+                log_context(),
                 image.image_id,
                 mime_type,
                 len(image_bytes),
@@ -533,17 +601,22 @@ class DeliveryImageAgent:
         image_data_url: str | None = None,
     ) -> str:
         recipient_phone = request.recipient_phone or "未提供（不得据此确认手机号一致）"
+        recipient_address = request.recipient_address or "未提供（不需要门牌号识别记录）"
         platform = request.platform.value if request.platform else "未提供"
         direction = request.direction.value if request.direction else "未提供"
+        # 固定的提示词放最前面、每单变化的参数放最后：模型服务的自动缓存按前缀匹配，
+        # 这样不同单子的请求共享同一段开头（约 5,800 token），可以命中缓存。不要把变化的内容挪回提示词前面。
         user_text = (
+            f"{prompt}\n\n"
+            "【本次审核输入】\n"
             f"当前国家：{request.country}\n"
             f"目标运单号 pno：{request.pno}\n"
             f"正向运单号 forward_pno：{request.forward_pno or '未提供'}\n"
             f"平台：{platform}\n"
             f"业务方向：{direction}\n"
             f"本单收件手机号 recipient_phone：{recipient_phone}\n"
-            f"本图是否系统 EPOD 图片（非用户上传）：{'是' if request.images[0].is_epod else '否'}\n"
-            f"{prompt}"
+            f"本单收件地址 recipient_address：{recipient_address}\n"
+            f"本图是否系统 EPOD 图片（非用户上传）：{'是' if request.images[0].is_epod else '否'}"
         )
         return self._call_model(request, user_text, deadline, image_data_url)
 
@@ -562,6 +635,7 @@ class DeliveryImageAgent:
             timeout_seconds = min(timeout_seconds, remaining_seconds)
         if image_data_url is None:
             raise ValueError("缺少已下载并校验的图片数据")
+        call_started = time.monotonic()
         if self.config.api_mode == "responses":
             response = self.client.responses.create(
                 model=self.config.model,
@@ -576,6 +650,7 @@ class DeliveryImageAgent:
                 ],
                 timeout=timeout_seconds,
             )
+            self._log_usage("image", response, request, [image_data_url], call_started)
             return str(getattr(response, "output_text", "") or "")
 
         response = self.client.chat.completions.create(
@@ -591,7 +666,21 @@ class DeliveryImageAgent:
             ],
             timeout=timeout_seconds,
         )
+        self._log_usage("image", response, request, [image_data_url], call_started)
         return str(response.choices[0].message.content or "")
+
+    def _log_usage(
+        self, call: str, response: Any, request: DeliveryImageRequest, data_urls: list[str], started: float,
+    ) -> None:
+        """记录这次模型调用的真实 token 用量；日志失败不能影响审核结果。"""
+        try:
+            log_usage(
+                call, response, self.config.model, self._duration_ms(started),
+                images=len(data_urls), epod=request.images[0].is_epod if len(request.images) == 1 else "-",
+                **{k: v for k, v in (pair.split("=", 1) for pair in describe_data_urls(data_urls).split(" "))},
+            )
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug("usage log failed", exc_info=True)
 
     def _parse_result(
         self,
@@ -705,6 +794,7 @@ class DeliveryImageAgent:
             notes.append(f"未提供{'和'.join(missing)}，无法匹配对应 DNR 举证规则。")
 
         phone_evidence_types = PHONE_EVIDENCE_TYPES
+        address_provided = request.recipient_address is not None
         if (
             request.platform == DeliveryPlatform.TT
             and request.direction == DeliveryDirection.RETURN
@@ -733,11 +823,27 @@ class DeliveryImageAgent:
             if result.decision == DeliveryDecision.CORRECT and waybill_finding and "与目标 pno 比对：不一致" in waybill_finding:
                 notes.append(f"图片 {image.image_id} 识别出的运单号与目标 pno 不一致。")
             if result.decision == DeliveryDecision.CORRECT and not DeliveryImageAgent._waybill_confirmed(image, request):
-                notes.append(
-                    f"图片 {image.image_id} 抄录的运单号未能由代码核对为与目标运单号完整一致，不能单图通过。"
-                )
+                required_source = required_waybill_source(image.evidence_type)
+                if required_source is not None and waybill_source(image) != required_source:
+                    reason = (
+                        "对话截图的运单号必须是快递员发送给客户的聊天文字，不能靠识别对话里的照片关联本单"
+                        if required_source == COURIER_TEXT_SOURCE
+                        else "照片的运单号必须来自图片中包裹面单上的信息，不能用水印（水印是系统标记，不能证明拍的包裹就是本单）"
+                    )
+                    notes.append(
+                        f"图片 {image.image_id} {reason}（运单号来源：{waybill_source(image) or '未记录'}），不能单图通过。"
+                    )
+                else:
+                    notes.append(
+                        f"图片 {image.image_id} 抄录的运单号未能由代码核对为与目标运单号完整一致，不能单图通过。"
+                    )
             if result.decision == DeliveryDecision.CORRECT and phone_finding and "与 recipient_phone 比对：不一致" in phone_finding:
                 notes.append(f"图片 {image.image_id} 识别出的手机号与 recipient_phone 不一致。")
+            if (
+                result.decision == DeliveryDecision.CORRECT
+                and house_number_status(image, address_provided) == HouseNumberStatus.MISMATCH
+            ):
+                notes.append(f"图片 {image.image_id} 的门牌号与收件地址门牌号不一致。")
             if (
                 result.decision == DeliveryDecision.CORRECT
                 and image.evidence_type in phone_evidence_types
@@ -832,7 +938,13 @@ class DeliveryImageAgent:
             ),
         )
 
-    def _uncertain_result(self, request: DeliveryImageRequest, duration_ms: int) -> DeliveryImageResponseData:
+    def _uncertain_result(
+        self, request: DeliveryImageRequest, duration_ms: int, error_type: str | None = None,
+    ) -> DeliveryImageResponseData:
+        # 失败的图要写明「审核失败」：整单可能是 HTTP 200，调用方靠 MODEL_ERROR 和这条说明识别出这张图没有得出结论
+        findings = (
+            [f"审核失败（{error_type}），本图没有得出结论，需要重新审核。"] if error_type else []
+        )
         return DeliveryImageResponseData(
             request_id=request.request_id,
             pno=request.pno,
@@ -847,6 +959,7 @@ class DeliveryImageAgent:
                     evidence_type="unknown",
                     policy_match="unknown",
                     conclusion="uncertain",
+                    findings=list(findings),
                 )
                 for image in request.images
             ],

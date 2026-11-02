@@ -9,7 +9,7 @@ import pytest
 
 from src.delivery_conversation.agent import ConversationEvidenceAgent
 from src.delivery_conversation.schemas import ConversationEvidenceRequest, ConversationMediaResult, ConversationMediaType, PhoneObservation
-from src.delivery_conversation.video_phone import VideoPhoneReader, compare_phones, normalize_phone
+from src.delivery_conversation.video_phone import MediaCommandError, VideoPhoneReader, compare_phones, normalize_phone
 
 
 def observation(raw="+66 99-181-2244", **kwargs):
@@ -106,7 +106,7 @@ def test_reader_supplies_images_but_not_target_phone_and_uses_actual_timestamps(
         client = SimpleNamespace(responses=SimpleNamespace(create=AsyncMock(return_value=SimpleNamespace(
             output_text='{"observations":[{"frame_index":2,"raw_phone":"0991812244","is_call_counterparty":true,"readable":true}]}'
         ))))
-        runner = AsyncMock(side_effect=[b"2.0"] + [b"\xff\xd8jpeg"] * len(VideoPhoneReader.sample_times(2)))
+        runner = AsyncMock(side_effect=[b"video\n2.0\n"] + [b"\xff\xd8jpeg"] * len(VideoPhoneReader.sample_times(2)))
         reader = VideoPhoneReader(SimpleNamespace(api_mode="responses", model="vision"), runner, client)
         items, times = await reader.read(b"video", ".mp4", 10)
         assert items[0].time_seconds == times[1]
@@ -114,6 +114,35 @@ def test_reader_supplies_images_but_not_target_phone_and_uses_actual_timestamps(
         assert sum(p["type"] == "input_image" for p in parts) == len(times)
         assert "0991812244" not in parts[0]["text"]
     asyncio.run(run())
+
+
+def test_frame_extraction_allows_non_full_range_yuv_as_separate_ffmpeg_args():
+    """手机视频常见的非全范围 YUV，新版 ffmpeg 的 mjpeg 默认拒绝（退出码 234），要显式放宽。"""
+    runner = AsyncMock(return_value=b"\xff\xd8jpeg")
+    reader = VideoPhoneReader(SimpleNamespace(), runner, SimpleNamespace())
+    asyncio.run(reader._extract_frame("ffmpeg", "clip.mp4", 1.5, 10))
+    command = runner.call_args.args[0]
+    index = command.index("-strict")
+    assert command[index + 1] == "unofficial"
+    assert command.index("-vcodec") < index < command.index("-q:v")
+    assert runner.await_count == 1
+
+
+def test_frame_extraction_falls_back_to_full_range_pixel_format_once():
+    runner = AsyncMock(side_effect=[MediaCommandError("音视频预处理失败"), b"\xff\xd8jpeg"])
+    reader = VideoPhoneReader(SimpleNamespace(), runner, SimpleNamespace())
+    assert asyncio.run(reader._extract_frame("ffmpeg", "clip.mp4", 0, 10)) == b"\xff\xd8jpeg"
+    fallback = runner.await_args_list[1].args[0]
+    assert "-strict" not in fallback
+    assert any("format=yuvj420p" in part for part in fallback)
+
+
+def test_frame_extraction_reports_error_when_fallback_also_fails():
+    runner = AsyncMock(side_effect=MediaCommandError("坏文件"))
+    reader = VideoPhoneReader(SimpleNamespace(), runner, SimpleNamespace())
+    with pytest.raises(MediaCommandError):
+        asyncio.run(reader._extract_frame("ffmpeg", "clip.mp4", 0, 10))
+    assert runner.await_count == 2
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="requires ffmpeg")
@@ -178,8 +207,7 @@ def test_analysis_uses_image_model_and_protocol(mode):
     async def run():
         responses = AsyncMock(return_value=SimpleNamespace(output_text='{"customer_received":"confirmed"}'))
         chat = AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"customer_received":"confirmed"}'))]))
-        config = SimpleNamespace(model='image-model', api_mode=mode, timeout_seconds=20,
-                                 conversation_analysis_model='old-model', conversation_analysis_api_mode='unused')
+        config = SimpleNamespace(model='image-model', api_mode=mode, timeout_seconds=20)
         agent = ConversationEvidenceAgent(config, model_client=SimpleNamespace(
             responses=SimpleNamespace(create=responses), chat=SimpleNamespace(completions=SimpleNamespace(create=chat))))
         request = ConversationEvidenceRequest(request_id='r', pno='THT1', country='TH', platform='TT',
@@ -197,8 +225,7 @@ def test_analysis_client_uses_image_credentials(monkeypatch):
     from unittest.mock import Mock
     constructor = Mock()
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(AsyncOpenAI=constructor))
-    ConversationEvidenceAgent(SimpleNamespace(api_token='image-token', base_url='https://image.example/v1',
-        conversation_analysis_api_token='old-token', conversation_analysis_base_url='https://old.example/v1'))
+    ConversationEvidenceAgent(SimpleNamespace(api_token='image-token', base_url='https://image.example/v1'))
     assert constructor.call_args.kwargs['api_key'] == 'image-token'
     assert constructor.call_args.kwargs['base_url'] == 'https://image.example/v1'
 
@@ -278,3 +305,48 @@ def test_prompt_speaker_example_matches_transcript_label_convention():
     prompt = (Path(__file__).parents[1] / "src/prompts/delivery_conversation.yaml").read_text()
     assert '"speaker_id": "0"' in prompt
     assert '"speaker_0"' not in prompt
+
+
+def _jpeg() -> bytes:
+    return b"\xff\xd8jpeg"
+
+
+def test_empty_frame_at_the_end_of_the_video_is_retried_slightly_earlier_and_reports_the_actual_time():
+    """容器时长比视频流略长时，最后一帧的取帧位置超出视频流结尾，ffmpeg 只输出 0 字节。"""
+    async def run():
+        count = len(VideoPhoneReader.sample_times(10))
+        last = VideoPhoneReader.sample_times(10)[-1]
+        client = SimpleNamespace(responses=SimpleNamespace(create=AsyncMock(return_value=SimpleNamespace(
+            output_text='{"observations":[{"frame_index":%d,"raw_phone":"0991812244","is_call_counterparty":true,"readable":true}]}' % count
+        ))))
+        runner = AsyncMock(side_effect=[b"video\n10.0\n"] + [_jpeg()] * (count - 1) + [b"", _jpeg()])
+        reader = VideoPhoneReader(SimpleNamespace(api_mode="responses", model="vision"), runner, client)
+        items, times = await reader.read(b"video", ".mp4", 10)
+        assert times[-1] == round(last - 1.0, 3)  # 往前退 1 秒取到
+        assert items[0].time_seconds == times[-1]
+        seek_args = [call.args[0][call.args[0].index("-ss") + 1] for call in runner.await_args_list[1:]]
+        assert seek_args[-2:] == [str(last), str(round(last - 1.0, 3))]
+    asyncio.run(run())
+
+
+def test_frame_backoff_keeps_going_earlier_and_gives_up_with_the_original_position():
+    async def run():
+        times = VideoPhoneReader.sample_times(10)
+        runner = AsyncMock(side_effect=[b"video\n10.0\n"] + [_jpeg()] * (len(times) - 1) + [b""] * 4)
+        reader = VideoPhoneReader(SimpleNamespace(api_mode="responses", model="vision"), runner, SimpleNamespace())
+        with pytest.raises(Exception, match=r"返回 0 字节") as exc_info:
+            await reader.read(b"video", ".mp4", 10)
+        assert f"第 {len(times)} 帧，{times[-1]}s" in str(exc_info.value)
+        assert runner.await_count == 1 + len(times) + 3  # 原位置加 3 次回退
+    asyncio.run(run())
+
+
+def test_backoff_never_goes_before_the_start_and_skips_duplicate_positions():
+    async def run():
+        runner = AsyncMock(side_effect=[b""] * 4)
+        reader = VideoPhoneReader(SimpleNamespace(), runner, SimpleNamespace())
+        frame, actual = await reader._frame_near("ffmpeg", "clip.mp4", 0.5, 10)
+        assert (frame, actual) == (b"", 0.5)
+        seeks = [call.args[0][call.args[0].index("-ss") + 1] for call in runner.await_args_list]
+        assert seeks == ["0.5", "0.0"]  # 退到开头后不再重复取同一个位置
+    asyncio.run(run())

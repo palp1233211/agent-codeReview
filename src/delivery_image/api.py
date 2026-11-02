@@ -5,11 +5,14 @@ from functools import lru_cache
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 
 from .config import DeliveryImageConfig, DeliveryImageConfigError
+from .logging_setup import configure_delivery_logging
 from .schemas import DeliveryImageRequest, DeliveryImageResponse
 from .service import DeliveryImageService
 from src.delivery_conversation.schemas import ConversationEvidenceRequest, ConversationEvidenceResponse
 from src.delivery_conversation.service import ConversationEvidenceService
 
+
+configure_delivery_logging()
 
 app = FastAPI(title="Delivery Image Review Agent", version="1.0.0")
 

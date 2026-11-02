@@ -89,3 +89,18 @@ def expected_policy_match(
         return PolicyMatch.UNKNOWN
     matrix = _RETURN if direction == DeliveryDirection.RETURN else _FORWARD
     return matrix[evidence_type][platform]
+
+
+def epod_can_pass(platform: DeliveryPlatform | None, direction: DeliveryDirection | None) -> bool | None:
+    """该平台/方向下，系统 EPOD 图片有没有可能被采纳。
+
+    系统 EPOD 图是包裹现场照，只可能归为「原合格 EPOD」或「补派照」两类（EPOD_ONLY_TYPES）；
+    这两类在矩阵里都是 rejected 时，EPOD 图不可能通过，调用方可以不下载、不调模型直接判不通过。
+    返回 None 表示平台或方向缺失，无法判断，按正常流程审核。读的是裁决用的同一张矩阵，规则改了这里自动跟着变。
+    """
+    if platform is None or direction is None:
+        return None
+    return any(
+        expected_policy_match(platform, direction, kind, is_epod=True) in (PolicyMatch.ACCEPTED, PolicyMatch.CONDITIONAL)
+        for kind in EPOD_ONLY_TYPES
+    )
