@@ -129,6 +129,20 @@ class _RecentMessageIds:
             return True
 
 
+def _send_answer(lark_client: LarkClient, chat_id: str, answer: str) -> None:
+    """优先发 Markdown 卡片（加粗、行内代码、表格才能渲染）；卡片发不出去就降级为纯文本。
+
+    降级的情况：飞书接口拒绝（RuntimeError）、卡片超过请求体上限（ValueError）。
+    纯文本也失败时，RuntimeError 交给调用方记日志。
+    """
+    try:
+        lark_client.send_markdown_message(chat_id, answer)
+        return
+    except (RuntimeError, ValueError):
+        logger.warning("Markdown 卡片发送失败，降级为纯文本: chat_id=%s", chat_id, exc_info=True)
+    lark_client.send_text_message(chat_id, answer)
+
+
 def _reply_via_dify(
     lark_client: LarkClient,
     dify_client: DifyClient,
@@ -157,7 +171,7 @@ def _reply_via_dify(
     )
 
     try:
-        lark_client.send_text_message(chat_id, answer)
+        _send_answer(lark_client, chat_id, answer)
     except RuntimeError:
         logger.exception("回复飞书消息失败: chat_id=%s", chat_id)
 
