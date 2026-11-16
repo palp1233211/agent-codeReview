@@ -10,7 +10,12 @@ from lark_oapi.api.drive.v1 import CopyFileRequest, CopyFileRequestBody
 from lark_oapi.api.docx.v1 import ListDocumentBlockRequest
 from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
+from src.lark.markdown_card import card_json
+
 FEISHU_API = "https://open.feishu.cn/open-apis"
+
+# 发卡片时允许的接收者类型：chat_id 发到会话，open_id 私信给用户
+_MARKDOWN_RECEIVE_ID_TYPES = frozenset({"chat_id", "open_id"})
 
 
 class LarkClient:
@@ -172,6 +177,38 @@ class LarkClient:
         resp = self._sdk.im.v1.message.create(req)
         if not resp.success():
             raise RuntimeError(f"send_text_message failed [{resp.code}]: {resp.msg}")
+        return resp.data.message_id
+
+    def send_markdown_message(
+        self,
+        receive_id: str,
+        text: str,
+        receive_id_type: str = "chat_id",
+    ) -> str:
+        """把 Markdown 作为卡片消息发出（加粗、行内代码、表格都能渲染）。
+
+        飞书「文本消息」不渲染 Markdown，所以用卡片 JSON 2.0 的 markdown 组件。
+        ``receive_id_type`` 默认 chat_id（发到会话）；传 open_id 时是私信给某个用户。
+        卡片超过飞书请求体上限时抛 ValueError，调用方应降级为 send_text_message。
+        """
+        if receive_id_type not in _MARKDOWN_RECEIVE_ID_TYPES:
+            raise ValueError(f"receive_id_type 只支持 {sorted(_MARKDOWN_RECEIVE_ID_TYPES)}: {receive_id_type!r}")
+        content = card_json(text)
+        req = (
+            CreateMessageRequest.builder()
+            .receive_id_type(receive_id_type)
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(receive_id)
+                .msg_type("interactive")
+                .content(content)
+                .build()
+            )
+            .build()
+        )
+        resp = self._sdk.im.v1.message.create(req)
+        if not resp.success():
+            raise RuntimeError(f"send_markdown_message failed [{resp.code}]: {resp.msg}")
         return resp.data.message_id
 
     def reply_text_message(
