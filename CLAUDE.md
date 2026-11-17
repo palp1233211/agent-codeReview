@@ -23,6 +23,10 @@ python cli.py lark-bot
 # Tests
 pytest tests/
 
+# Dify bot regression: fixed questions against the published app (DIFY_BASE_URL / DIFY_API_KEY).
+# Run after editing Dify prompts/flow; --runs 3 exposes flaky Guard/classifier calls. Cases: src/dify/regression_cases.yaml
+python -m src.dify.regression --runs 3 --exclude-tag backlog
+
 # Docker images
 docker build --target openai-runtime -t my-agent:openai .
 docker build --target full-runtime -t my-agent:full .
