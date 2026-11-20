@@ -137,6 +137,31 @@ def _run_agent(prompt: str, *, repo_path: str, max_turns: int) -> str:
     return asyncio.run(_collect())
 
 
+def resolve_doc_path(
+    docs_repo: DocsRepo,
+    *,
+    task_name: str,
+    query: str,
+    topic: str,
+    title: str,
+    aliases: tuple[str, ...],
+    keywords: tuple[str, ...],
+    fallback_topic: str,
+) -> str:
+    """先按索引路由到已有文档；路由不到才新建，避免同主题散落成多篇。"""
+    entry = docs_repo.route(task_name=topic or task_name, keyword="", query=query)
+    if entry is not None:
+        return entry.path
+
+    new_topic = topic or task_name or fallback_topic
+    return docs_repo.create_doc(
+        topic=new_topic,
+        title=title or new_topic,
+        aliases=list(aliases),
+        keywords=list(keywords),
+    )
+
+
 class GapFiller:
     def __init__(
         self,
@@ -233,21 +258,15 @@ class GapFiller:
         return "\n".join(lines)
 
     def _resolve_doc_path(self, gap: Any, result: FillResult) -> str:
-        """先按索引路由到已有文档；路由不到才新建，避免同主题散落成多篇。"""
-        entry = self._docs_repo.route(
-            task_name=result.topic or gap.task_name,
-            keyword="",
+        return resolve_doc_path(
+            self._docs_repo,
+            task_name=gap.task_name,
             query=gap.original_query,
-        )
-        if entry is not None:
-            return entry.path
-
-        topic = result.topic or gap.task_name or f"gap_{gap.id}"
-        return self._docs_repo.create_doc(
-            topic=topic,
-            title=result.title or topic,
-            aliases=list(result.aliases),
-            keywords=list(result.keywords),
+            topic=result.topic,
+            title=result.title,
+            aliases=result.aliases,
+            keywords=result.keywords,
+            fallback_topic=f"gap_{gap.id}",
         )
 
     def _reject(self, gap: Any, *, chat_id: str, reason: str) -> None:

@@ -143,3 +143,33 @@
   turns: ["没看懂"]
   must_contain_any: ["暂时回答不了", "无法回答"]
   tags: [scope]
+
+# ---- 代码逻辑：Dify 只负责分类，返回 code_question 信封，机器人收到后转给代码问答（读代码）----
+#      这些用例只验证分类路由；读代码本身的质量在 tests/test_code_qa.py 和人工冒烟里看
+- id: code_route_sql
+  turns: ["包裹丢失处罚的查询 SQL 是什么"]
+  must_contain: ["code_question"]
+  tags: [code, route]
+
+- id: code_route_enum
+  turns: ["abnormal_message 的 punish_category 有哪些枚举值"]
+  must_contain: ["code_question"]
+  tags: [code, route]
+
+- id: code_route_table_join
+  turns: ["申诉表怎么关联处罚表"]
+  must_contain: ["code_question"]
+  tags: [code, route]
+
+- id: code_route_dedupe_logic
+  turns: ["虚假妥投和丢失重复处罚，系统会删除哪一个"]
+  must_contain: ["code_question"]
+  tags: [code, route]
+
+- id: rule_amount_stays_faq
+  note: 只问怎么罚、罚多少、对谁罚，仍走规则解释，不能被新分类抢走
+  turns: ["包裹丢失处罚金额是多少，对谁罚"]
+  must_not_contain: ["code_question"]
+  must_contain_any: ["自营", "加盟商"]
+  no_jargon: true
+  tags: [rule, route]
