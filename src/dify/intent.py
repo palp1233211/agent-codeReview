@@ -106,3 +106,25 @@ def _parse_legacy(payload: dict[str, Any], raw: str) -> DifyEnvelope | None:
         gap_query=_text(payload.get("original_query")) if is_unknown else "",
         raw_json=raw,
     )
+
+
+CODE_QUESTION_INTENT = "code_question"
+
+
+def parse_code_question(answer: str) -> str | None:
+    """Chatflow 把问题归为「读代码才能答」时返回 {"intent":"code_question","question":"..."}。
+
+    返回要交给代码问答的问题；不是这种信封、或问题为空返回 None（调用方走原来的流程）。
+    """
+    if not answer or not answer.strip():
+        return None
+
+    try:
+        payload = json.loads(_strip_fence(answer))
+    except (TypeError, ValueError):
+        return None
+
+    if not isinstance(payload, dict) or payload.get(_LEGACY_KEY) != CODE_QUESTION_INTENT:
+        return None
+
+    return _text(payload.get("question") or payload.get("original_query")) or None

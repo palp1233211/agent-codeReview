@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from collections import deque
 
@@ -12,7 +13,11 @@ import requests
 from lark_oapi.event.context import EventContext
 
 from ..dify.client import DifyClient
+from ..dify.intent import parse_code_question
+from ..knowledge.code_qa import CodeQADrafter
+from ..knowledge.code_qa_service import CodeQaService
 from ..knowledge.commands import KbCommands
+from ..knowledge.docs_repo import DocsRepo
 from ..knowledge.factory import build_kb_commands
 from ..knowledge.gap_recorder import render_answer
 from ..storage.conversation_store import ConversationStore
@@ -143,6 +148,79 @@ def _send_answer(lark_client: LarkClient, chat_id: str, answer: str) -> None:
     lark_client.send_text_message(chat_id, answer)
 
 
+_CODE_QA_DISABLED = "代码问答暂未开通，这个问题我先回答不了。"
+_CODE_USAGE = "用法：`/code <问题>`，例如 `/code 包裹丢失处罚的查询 SQL 是什么`。"
+_CODE_COMMAND_RE = re.compile(r"^/code(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+
+
+def _log_conversation(
+    conversation_store: ConversationStore,
+    *,
+    user_id: str,
+    user_name: str,
+    chat_id: str,
+    message_id: str,
+    conversation_id: str,
+    question: str,
+    answer: str,
+) -> None:
+    try:
+        conversation_store.log(
+            user_id=user_id,
+            user_name=user_name,
+            chat_id=chat_id,
+            message_id=message_id,
+            conversation_id=conversation_id,
+            question=question,
+            answer=answer,
+        )
+    except pymysql.MySQLError:
+        logger.exception("记录对话到数据库失败: message_id=%s", message_id)
+
+
+def _hand_to_code_qa(
+    code_qa: CodeQaService | None,
+    lark_client: LarkClient,
+    conversation_store: ConversationStore,
+    *,
+    question: str,
+    original_text: str,
+    conversation_id: str,
+    user_id: str,
+    user_name: str,
+    chat_id: str,
+    message_id: str,
+) -> None:
+    """把读代码才能答的问题交给代码问答服务；对话日志等它出结果后再记（记最终答案）。"""
+    if code_qa is None:
+        _send_answer_safely(lark_client, chat_id, _CODE_QA_DISABLED)
+        _log_conversation(
+            conversation_store, user_id=user_id, user_name=user_name, chat_id=chat_id,
+            message_id=message_id, conversation_id=conversation_id,
+            question=original_text, answer=_CODE_QA_DISABLED,
+        )
+        return
+
+    code_qa.submit(
+        question,
+        user_id=user_id,
+        chat_id=chat_id,
+        message_id=message_id,
+        on_done=lambda final: _log_conversation(
+            conversation_store, user_id=user_id, user_name=user_name, chat_id=chat_id,
+            message_id=message_id, conversation_id=conversation_id,
+            question=original_text, answer=final,
+        ),
+    )
+
+
+def _send_answer_safely(lark_client: LarkClient, chat_id: str, answer: str) -> None:
+    try:
+        _send_answer(lark_client, chat_id, answer)
+    except RuntimeError:
+        logger.exception("回复飞书消息失败: chat_id=%s", chat_id)
+
+
 def _reply_via_dify(
     lark_client: LarkClient,
     dify_client: DifyClient,
@@ -153,12 +231,24 @@ def _reply_via_dify(
     message_id: str,
     text: str,
     user_name: str = "",
+    code_qa: CodeQaService | None = None,
 ) -> None:
     """调用 Dify 拿 answer、回传飞书、记录这轮问答；跑在独立线程里，不阻塞事件回调。"""
     try:
         reply = dify_client.chat(user_id, text)
     except (requests.RequestException, RuntimeError):
         logger.exception("调用 Dify 失败: user_id=%s", user_id)
+        return
+
+    # Chatflow 判定「得读代码才能答」时返回 code_question 信封：转给代码问答，不走知识盲区
+    code_question = parse_code_question(reply.answer)
+    if code_question is not None:
+        _hand_to_code_qa(
+            code_qa, lark_client, conversation_store,
+            question=code_question, original_text=text,
+            conversation_id=reply.conversation_id,
+            user_id=user_id, user_name=user_name, chat_id=chat_id, message_id=message_id,
+        )
         return
 
     # Dify 命中不了知识库时返回的是意图信封而非人话，这里换成文案并记录知识盲区
@@ -170,23 +260,12 @@ def _reply_via_dify(
         gap_store=gap_store,
     )
 
-    try:
-        _send_answer(lark_client, chat_id, answer)
-    except RuntimeError:
-        logger.exception("回复飞书消息失败: chat_id=%s", chat_id)
-
-    try:
-        conversation_store.log(
-            user_id=user_id,
-            user_name=user_name,
-            chat_id=chat_id,
-            message_id=message_id,
-            conversation_id=reply.conversation_id,
-            question=text,
-            answer=answer,
-        )
-    except pymysql.MySQLError:
-        logger.exception("记录对话到数据库失败: message_id=%s", message_id)
+    _send_answer_safely(lark_client, chat_id, answer)
+    _log_conversation(
+        conversation_store, user_id=user_id, user_name=user_name, chat_id=chat_id,
+        message_id=message_id, conversation_id=reply.conversation_id,
+        question=text, answer=answer,
+    )
 
 
 def _process_message(
@@ -200,8 +279,9 @@ def _process_message(
     message_id: str,
     text: str,
     user_name: str = "",
+    code_qa: CodeQaService | None = None,
 ) -> None:
-    """先看是不是 /kb 指令，不是才转发 Dify。跑在独立线程里。
+    """先看是不是 /kb、/code 指令，不是才转发 Dify。跑在独立线程里。
 
     指令必须在转发之前拦截，否则会被当成普通提问送进 Chatflow。
     """
@@ -214,6 +294,15 @@ def _process_message(
                 logger.exception("回复 /kb 指令失败: chat_id=%s", chat_id)
             return
 
+    code_command = _CODE_COMMAND_RE.match(text.strip())
+    if code_command is not None:
+        _handle_code_command(
+            code_command.group(1), code_qa, lark_client, conversation_store,
+            original_text=text, user_id=user_id, user_name=user_name,
+            chat_id=chat_id, message_id=message_id,
+        )
+        return
+
     _reply_via_dify(
         lark_client,
         dify_client,
@@ -224,7 +313,42 @@ def _process_message(
         message_id,
         text,
         user_name,
+        code_qa,
     )
+
+
+def _handle_code_command(
+    question: str | None,
+    code_qa: CodeQaService | None,
+    lark_client: LarkClient,
+    conversation_store: ConversationStore,
+    *,
+    original_text: str,
+    user_id: str,
+    user_name: str,
+    chat_id: str,
+    message_id: str,
+) -> None:
+    """`/code <问题>`：绕过 Dify 分类，直接读代码回答（分类误判时的兜底，也方便排查）。"""
+    question = (question or "").strip()
+    if not question:
+        _send_text_safely(lark_client, chat_id, _CODE_USAGE)
+        return
+    if code_qa is None:
+        _send_text_safely(lark_client, chat_id, _CODE_QA_DISABLED)
+        return
+    _hand_to_code_qa(
+        code_qa, lark_client, conversation_store,
+        question=question, original_text=original_text, conversation_id="",
+        user_id=user_id, user_name=user_name, chat_id=chat_id, message_id=message_id,
+    )
+
+
+def _send_text_safely(lark_client: LarkClient, chat_id: str, text: str) -> None:
+    try:
+        lark_client.send_text_message(chat_id, text)
+    except RuntimeError:
+        logger.exception("回复飞书消息失败: chat_id=%s", chat_id)
 
 
 def build_message_receive_handler(
@@ -234,6 +358,7 @@ def build_message_receive_handler(
     gap_store: KnowledgeGapStore,
     kb_commands: KbCommands | None = None,
     bot_open_id: str | None = None,
+    code_qa: CodeQaService | None = None,
 ):
     """构造 im.message.receive_v1 事件回调：文本消息 -> Dify -> 回传 answer 到同一会话。
 
@@ -290,6 +415,7 @@ def build_message_receive_handler(
                 message.message_id,
                 text,
                 _get_cached_user_name(lark_client, user_id),
+                code_qa,
             ),
             daemon=True,
         ).start()
@@ -300,6 +426,31 @@ def build_message_receive_handler(
 def on_message_read(data: lark.im.v1.P2ImMessageMessageReadV1) -> None:
     """消息已读回执：飞书控制台若订阅了该事件就会推送，这里只记录，不处理。"""
     logger.debug("消息已读事件: %s", lark.JSON.marshal(data))
+
+
+def _build_code_qa(lark_client: LarkClient, gap_store: KnowledgeGapStore) -> CodeQaService | None:
+    """装配代码问答；知识草稿依赖知识库目录，没配就只回答、不沉淀。"""
+    try:
+        drafter = CodeQADrafter(gap_store=gap_store, docs_repo=DocsRepo.from_env())
+    except KeyError:
+        logger.warning("未配置 KNOWLEDGE_DOCS_DIR，代码问答的答案不会沉淀成知识草稿。")
+        drafter = None
+
+    try:
+        service = CodeQaService.from_env(
+            send=lambda chat_id, text: _send_answer(lark_client, chat_id, text),
+            drafter=drafter,
+        )
+    except (KeyError, ValueError) as exc:
+        logger.warning("代码问答未启用（%s），/code 与代码逻辑类问题不可用。", exc)
+        return None
+
+    available = service.qa.available_projects
+    if not available:
+        logger.warning("代码问答已启用，但没有位于 master 分支的开放项目，提问都会被告知暂不回答。")
+    else:
+        logger.info("代码问答已启用：项目=%s 版本=%s", available, service.qa.versions())
+    return service
 
 
 def run_ws_bot() -> int:
@@ -331,6 +482,9 @@ def run_ws_bot() -> int:
         logger.warning("知识补全流水线未启用（%s），/kb 指令不可用。", exc)
         kb_commands = None
 
+    # 代码问答同理：缺配置（项目目录、模型）只是少了这个能力，不该拖垮问答机器人
+    code_qa = _build_code_qa(lark_client, gap_store)
+
     # 群聊过滤依赖机器人自己的 open_id 来判断"是不是 @ 了我"；取不到就没法安全放行
     # 群聊消息，只能降级为仅处理私聊（而不是退回到"处理群里所有消息"的旧行为）。
     try:
@@ -349,6 +503,7 @@ def run_ws_bot() -> int:
                 gap_store,
                 kb_commands,
                 bot_open_id,
+                code_qa,
             )
         )
         .register_p2_im_message_message_read_v1(on_message_read)
