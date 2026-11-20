@@ -447,7 +447,11 @@ def _build_code_qa(lark_client: LarkClient, gap_store: KnowledgeGapStore) -> Cod
 
     available = service.qa.available_projects
     if not available:
-        logger.warning("代码问答已启用，但没有位于 master 分支的开放项目，提问都会被告知暂不回答。")
+        logger.warning(
+            "代码问答已启用，但没有可用的开放项目，提问都会被告知暂不回答。%s；%s",
+            service.qa.describe_root(),
+            "；".join(service.qa.describe_projects()),
+        )
     else:
         logger.info("代码问答已启用：项目=%s 版本=%s", available, service.qa.versions())
     return service
