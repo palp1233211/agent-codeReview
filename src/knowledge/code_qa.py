@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -243,35 +242,81 @@ def render_reply(answer: CodeAnswer, *, versions: tuple[str, ...], warning: str 
     return "\n".join(lines)
 
 
-def git_branch(directory: str) -> str:
-    """目录当前检出的分支名；不是 git 仓库、目录不存在或处于游离 HEAD 都返回空串。"""
+def _git_dir(directory: str) -> str | None:
+    """项目的 .git 目录；.git 是文件（工作树/子模块）时跟到它指向的目录。"""
+    dot_git = os.path.join(directory, ".git")
     try:
-        done = subprocess.run(
-            ["git", "-C", directory, "symbolic-ref", "--short", "-q", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
+        if os.path.isdir(dot_git):
+            return dot_git
+        if os.path.isfile(dot_git):
+            with open(dot_git, encoding="utf-8") as fh:
+                first = fh.readline().strip()
+            if first.startswith("gitdir:"):
+                target = first.split(":", 1)[1].strip()
+                return target if os.path.isabs(target) else os.path.normpath(os.path.join(directory, target))
+    except OSError:
+        return None
+    return None
+
+
+def _read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
         return ""
-    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+_REF_PREFIX = "ref: "
+_HEADS = "refs/heads/"
+
+
+def git_branch(directory: str) -> str:
+    """目录当前检出的分支名；不是 git 仓库、读不到或处于游离 HEAD 都返回空串。
+
+    直接读 `.git/HEAD`，不调用 git 命令——运行镜像里没有 git，而且挂载进容器的仓库
+    属主和容器用户不同，git 还会因为 dubious ownership 拒绝工作。
+    """
+    git_dir = _git_dir(directory)
+    if git_dir is None:
+        return ""
+    head = _read_text(os.path.join(git_dir, "HEAD"))
+    if head.startswith(_REF_PREFIX + _HEADS):
+        return head[len(_REF_PREFIX + _HEADS):]
+    return ""
+
+
+def git_commit(directory: str) -> str:
+    """当前提交的 7 位短哈希；读不到返回空串。先找松散 ref，再找 packed-refs。"""
+    git_dir = _git_dir(directory)
+    if git_dir is None:
+        return ""
+    head = _read_text(os.path.join(git_dir, "HEAD"))
+    if not head.startswith(_REF_PREFIX):
+        return head[:7] if re.fullmatch(r"[0-9a-f]{40}", head) else ""
+
+    ref = head[len(_REF_PREFIX):]
+    sha = _read_text(os.path.join(git_dir, *ref.split("/")))
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        sha = ""
+        for line in _read_text(os.path.join(git_dir, "packed-refs")).splitlines():
+            parts = line.split(" ", 1)
+            if len(parts) == 2 and parts[1] == ref and re.fullmatch(r"[0-9a-f]{40}", parts[0]):
+                sha = parts[0]
+                break
+    return sha[:7]
 
 
 def code_versions(repo_path: str, projects: tuple[str, ...]) -> tuple[str, ...]:
-    """各项目当前检出的 `项目@短哈希(分支)`，让提问的人知道答案对应哪版代码。取不到就略过。"""
+    """各项目当前检出的 `项目@短哈希(分支)`，让提问的人知道答案对应哪版代码。读不到就略过。"""
     versions: list[str] = []
     for project in projects:
         directory = os.path.join(repo_path, project)
-        try:
-            head = subprocess.run(
-                ["git", "-C", directory, "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, timeout=5, check=True,
-            ).stdout.strip()
-            branch = subprocess.run(
-                ["git", "-C", directory, "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=5, check=True,
-            ).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
+        branch = git_branch(directory)
+        if not branch:
             continue
-        versions.append(f"{project}@{head}({branch})")
+        commit = git_commit(directory)
+        versions.append(f"{project}@{commit}({branch})" if commit else f"{project}({branch})")
     return tuple(versions)
 
 
