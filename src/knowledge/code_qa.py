@@ -418,6 +418,31 @@ class CodeQA:
             if self._branch_of(os.path.join(self._repo_path, p)) == self._required_branch
         )
 
+    def describe_root(self) -> str:
+        """给日志用的根目录描述（含服务器路径，不要发给用户）。"""
+        try:
+            entries = sorted(os.listdir(self._repo_path))[:20]
+        except OSError as exc:
+            return f"代码根目录 {self._repo_path} 读取失败：{exc.__class__.__name__}"
+        return f"代码根目录 {self._repo_path} 下有：{', '.join(entries) or '（空）'}"
+
+    def describe_projects(self) -> tuple[str, ...]:
+        """逐个说明每个开放项目当前的状态，排查「为什么没有可用项目」用。"""
+        lines: list[str] = []
+        for project in self._allowed_projects:
+            directory = os.path.join(self._repo_path, project)
+            if not os.path.isdir(directory):
+                lines.append(f"{project}: 目录不存在")
+                continue
+            branch = self._branch_of(directory)
+            if not branch:
+                lines.append(f"{project}: 目录存在，但读不到分支（不是 git 仓库、.git 读不出 HEAD 或处于游离 HEAD）")
+            elif branch == self._required_branch or self._allow_any_branch:
+                lines.append(f"{project}: 分支 {branch}，可用")
+            else:
+                lines.append(f"{project}: 分支 {branch}，不在 {self._required_branch}")
+        return tuple(lines)
+
     def off_branch_projects(self) -> tuple[str, ...]:
         """放开分支限制时，实际在回答里用到、但不在要求分支上的项目；没放开就恒为空。"""
         if not self._allow_any_branch:
@@ -449,6 +474,11 @@ class CodeQA:
             raise ValueError("问题不能为空")
 
         if not self.available_projects:
+            logger.warning(
+                "代码问答没有可用项目：%s；%s",
+                self.describe_root(),
+                "；".join(self.describe_projects()),
+            )
             return CodeAnswer(found=False, reason=self._no_project_reason())
 
         raw = self._run_agent(self._build_prompt(question, hint, history))
@@ -460,11 +490,14 @@ class CodeQA:
 
     def _no_project_reason(self) -> str:
         present = {
-            p: self._branch_of(os.path.join(self._repo_path, p)) or "非 git 仓库"
+            p: self._branch_of(os.path.join(self._repo_path, p)) or "读不到分支"
             for p in self._present_projects()
         }
         if not present:
-            return "代码库里没有可查阅的项目，暂时无法回答。"
+            return (
+                f"没有找到可查阅的项目目录（找的是：{'、'.join(self._allowed_projects)}），"
+                "请管理员检查 FBI_REPO_PATH 的挂载和 CODE_QA_PROJECTS。"
+            )
         detail = "、".join(f"{p}（当前 {b}）" for p, b in present.items())
         return (
             f"只回答 {self._required_branch} 分支上的代码，但这些项目没在该分支上：{detail}。"
