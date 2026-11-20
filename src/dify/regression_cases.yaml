@@ -173,3 +173,70 @@
   must_contain_any: ["自营", "加盟商"]
   no_jargon: true
   tags: [rule, route]
+
+# ---- 代码问答的追问：Dify 记忆里只有 code_question 信封，分类要靠它把追问接回 code ----
+- id: code_followup_other_item
+  turns: ["包裹丢失处罚的查询 SQL 是什么", "那客户投诉的呢"]
+  must_contain: ["code_question"]
+  tags: [code, route, followup]
+
+- id: code_followup_not_understood
+  turns: ["abnormal_message 的 punish_category 有哪些枚举值", "没看懂，再详细说说"]
+  must_contain: ["code_question"]
+  tags: [code, route, followup]
+
+- id: code_then_waybill_query_stays_punish
+  note: 代码问答之后换成具体运单的查询，不能被追问规则抢进 code
+  turns: ["包裹丢失处罚的查询 SQL 是什么", "运单 TH64189A9ES62B 有哪些处罚项，金额多少？"]
+  must_not_contain: ["code_question"]
+  must_contain: ["15"]
+  tags: [code, route, data]
+
+# ---- 规则解释之后的追问：沿用刚解释过的处罚项，不能回「暂时回答不了」----
+- id: rule_followup_not_understood
+  turns: ["包裹丢失这个处罚项是怎么处罚的", "没看懂"]
+  expect_refused: false
+  must_contain_any: ["简单说", "举例", "例如"]
+  must_not_contain: ["暂时回答不了", "code_question"]
+  no_jargon: true
+  tags: [rule, followup]
+
+- id: rule_followup_amount
+  turns: ["包裹丢失这个处罚项是怎么处罚的", "金额呢"]
+  must_contain_any: ["500", "1000"]
+  must_not_contain: ["暂时回答不了"]
+  no_jargon: true
+  tags: [rule, followup]
+
+- id: rule_followup_new_person
+  turns: ["客户投诉处罚是怎么来的", "新人保护期内会不会罚"]
+  must_contain: ["新人保护期"]
+  must_not_contain: ["暂时回答不了"]
+  no_jargon: true
+  tags: [rule, followup]
+
+# ---- 短追问（没看懂/再详细说说/举个例子）：由 Dify 的会话变量 last_topic 确定性地接回上一轮的主题 ----
+- id: rule_followup_detail
+  turns: ["包裹丢失这个处罚项是怎么处罚的", "再详细说说"]
+  must_not_contain: ["暂时回答不了", "code_question"]
+  must_contain_any: ["处罚", "包裹丢失"]
+  no_jargon: true
+  tags: [rule, followup]
+
+- id: punish_followup_not_understood
+  turns: ["运单 TH64189A9ES62B 有哪些处罚项，金额多少？", "没看懂"]
+  must_contain: ["15"]
+  must_not_contain: ["暂时回答不了", "无法生成查询", "code_question"]
+  no_jargon: true
+  tags: [followup, data]
+
+- id: code_followup_detail
+  turns: ["包裹丢失处罚的查询 SQL 是什么", "再详细说说"]
+  must_contain: ["code_question"]
+  tags: [code, route, followup]
+
+- id: followup_after_out_of_scope_is_not_revived
+  note: 超范围回复会清空话题，之后的短追问不能再接回更早的主题
+  turns: ["包裹丢失这个处罚项是怎么处罚的", "帮我重跑今天的处罚任务", "没看懂"]
+  must_not_contain: ["code_question"]
+  tags: [followup, scope]

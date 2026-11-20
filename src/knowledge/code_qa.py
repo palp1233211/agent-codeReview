@@ -35,6 +35,7 @@ _DEFAULT_TIMEOUT_SECONDS = 300
 _DEFAULT_BRANCH = "master"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _MAX_ANSWER_CHARS = 4000
+_MAX_HISTORY_CHARS = 1500
 
 _SOURCE_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[\w.\-]+)+(?::\d+(?:-\d+)?)?$")
 
@@ -384,8 +385,16 @@ class CodeQA:
     def versions(self) -> tuple[str, ...]:
         return code_versions(self._repo_path, self.available_projects)
 
-    def ask(self, question: str, *, hint: str = "") -> CodeAnswer:
+    def ask(
+        self,
+        question: str,
+        *,
+        hint: str = "",
+        history: tuple[tuple[str, str], ...] = (),
+    ) -> CodeAnswer:
         """读代码回答一个问题。
+
+        `history` 是该用户最近几轮的（问题, 答案），只用来听懂"那个/这个/它"指什么。
 
         agent 输出没过校验时返回 found=False（对用户诚实说没查出来）；
         agent 本身跑挂了（模型不可用等）则让异常冒出去，由调用方决定怎么告知。
@@ -397,7 +406,7 @@ class CodeQA:
         if not self.available_projects:
             return CodeAnswer(found=False, reason=self._no_project_reason())
 
-        raw = self._run_agent(self._build_prompt(question, hint))
+        raw = self._run_agent(self._build_prompt(question, hint, history))
         try:
             return parse_code_answer(raw, allowed_projects=self.available_projects)
         except CodeAnswerError as exc:
@@ -423,8 +432,19 @@ class CodeQA:
             return f"- {project}"
         return f"- {project}（当前分支 {branch or '未知'}，不是 {self._required_branch}，答案里要说明）"
 
-    def _build_prompt(self, question: str, hint: str) -> str:
-        lines = ["## 本次要回答的问题", "", f"用户提问：{question}"]
+    def _build_prompt(
+        self, question: str, hint: str, history: tuple[tuple[str, str], ...] = ()
+    ) -> str:
+        lines: list[str] = []
+        if history:
+            lines += [
+                "## 之前的对话（只用来理解“这个/那个/它”指什么，结论仍须读代码确认，不能照抄之前的答案）",
+                "",
+            ]
+            for old_question, old_answer in history:
+                lines += [f"- 用户问：{old_question}", f"  回答摘要：{old_answer[:_MAX_HISTORY_CHARS]}"]
+            lines.append("")
+        lines += ["## 本次要回答的问题", "", f"用户提问：{question}"]
         if hint:
             lines.append(f"人工补充线索（涉及的项目/方法，优先按此定位）：{hint}")
         lines += [

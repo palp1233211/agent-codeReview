@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -26,6 +27,8 @@ _FAILED = "代码问答这次出错了，请稍后再试；如果一直这样，
 _DRAFT_NOTE = "\n\n已整理成知识草稿 #{gap_id}，管理员确认后可用 `/kb approve {gap_id}` 入库。"
 
 _DEFAULT_MAX_CONCURRENT = 2
+_DEFAULT_CONTEXT_TURNS = 3
+_DEFAULT_CONTEXT_MINUTES = 30
 
 
 def _thread_executor(job: Callable[[], None]) -> None:
@@ -42,6 +45,9 @@ class CodeQaService:
         allowed_chats: frozenset[str] = frozenset(),
         max_concurrent: int = _DEFAULT_MAX_CONCURRENT,
         executor: Callable[[Callable[[], None]], None] = _thread_executor,
+        context_turns: int = _DEFAULT_CONTEXT_TURNS,
+        context_minutes: int = _DEFAULT_CONTEXT_MINUTES,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._qa = qa
         self._drafter = drafter
@@ -50,6 +56,12 @@ class CodeQaService:
         self.max_concurrent = max_concurrent
         self._slots = threading.BoundedSemaphore(max_concurrent)
         self._executor = executor
+        self._context_turns = context_turns
+        self._context_seconds = context_minutes * 60
+        self._clock = clock
+        # user_id -> (最后更新时间, ((问题, 答案), ...))；值整体替换，不原地修改
+        self._history: dict[str, tuple[float, tuple[tuple[str, str], ...]]] = {}
+        self._history_lock = threading.Lock()
 
     @property
     def qa(self) -> CodeQA:
@@ -66,6 +78,7 @@ class CodeQaService:
             send=send,
             allowed_chats=frozenset(c.strip() for c in raw.split(",") if c.strip()),
             max_concurrent=int(os.environ.get("CODE_QA_MAX_CONCURRENT", _DEFAULT_MAX_CONCURRENT)),
+            context_minutes=int(os.environ.get("CODE_QA_CONTEXT_MINUTES", _DEFAULT_CONTEXT_MINUTES)),
         )
 
     def submit(
@@ -121,7 +134,8 @@ class CodeQaService:
         self._finish(chat_id, text, on_done)
 
     def _answer(self, question: str, user_id: str, chat_id: str, message_id: str) -> str:
-        answer = self._qa.ask(question)
+        answer = self._qa.ask(question, history=self._history_of(user_id))
+        self._remember(user_id, question, answer)
         off = self._qa.off_branch_projects()
         warning = (
             f"以下项目当前不在 {self._qa.required_branch} 分支，答案可能和线上不一致：{'、'.join(off)}"
@@ -137,6 +151,23 @@ class CodeQaService:
             if gap_id is not None:
                 text += _DRAFT_NOTE.format(gap_id=gap_id)
         return text
+
+    def _history_of(self, user_id: str) -> tuple[tuple[str, str], ...]:
+        with self._history_lock:
+            entry = self._history.get(user_id)
+        if entry is None or self._clock() - entry[0] > self._context_seconds:
+            return ()
+        return entry[1]
+
+    def _remember(self, user_id: str, question: str, answer: Any) -> None:
+        """只在 agent 正常返回后记；崩溃的那轮没有可靠答案，不进上下文。"""
+        summary = answer.answer if answer.found else f"代码里没有找到依据：{answer.reason}"
+        turns = (*self._history_of(user_id), (question, summary))[-self._context_turns:]
+        now = self._clock()
+        with self._history_lock:
+            # 顺手清掉过期的用户，字典不会随着提问的人越来越多而无限长大
+            fresh = {u: e for u, e in self._history.items() if now - e[0] <= self._context_seconds}
+            self._history = {**fresh, user_id: (now, turns)}
 
     def _finish(self, chat_id: str, text: str, on_done: Callable[[str], None] | None) -> None:
         self._safe_send(chat_id, text)
