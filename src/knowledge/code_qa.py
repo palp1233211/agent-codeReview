@@ -30,7 +30,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PROJECTS = ("fbi", "bi-common", "ard-api", "ard-etl")
 _DEFAULT_MAX_TURNS = 40
-_DEFAULT_TIMEOUT_SECONDS = 300
+_DEFAULT_TIMEOUT_SECONDS = 600
+# 单次 Read 最多读多少行。运行时是无状态的，每一轮都把完整历史重发给模型：
+# 一次读上千行，之后每一轮都要背着它，实测一个问题的上下文涨到 55 万字符、单轮 50 多秒。
+_DEFAULT_MAX_READ_LINES = 400
 _DEFAULT_BRANCH = "master"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _MAX_ANSWER_CHARS = 4000
@@ -109,8 +112,43 @@ def _inside(root: str, target: str) -> bool:
         return False
 
 
-def make_read_guard(repo_path: str) -> Callable[..., Any]:
-    """PreToolUse 钩子：Read/Grep/Glob 只能碰仓库内的非敏感路径。
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _line_count(path: str) -> int | None:
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as handle:
+            return sum(1 for _ in handle)
+    except OSError:
+        return None
+
+
+def _read_cap_reason(root: str, raw: str, tool_input: dict[str, Any], cap: int) -> str | None:
+    """Read 一次要读的行数超过上限就返回拒绝理由；读不了的文件、乱写的行号交给工具自己处理。"""
+    path = raw if os.path.isabs(raw) else os.path.join(root, raw)
+    total = _line_count(path)
+    start = _as_int(tool_input.get("start_line")) if tool_input.get("start_line") else 1
+    end = _as_int(tool_input.get("end_line")) if tool_input.get("end_line") else None
+    if total is None or start is None or start < 1 or (tool_input.get("end_line") and end is None):
+        return None
+    last = min(end, total) if end else total
+    requested = last - start + 1
+    if requested <= cap:
+        return None
+    return (
+        f"单次最多读 {cap} 行，这次要读约 {requested} 行（文件共 {total} 行）。"
+        f"请先用 Grep 定位关键位置，再用 start_line/end_line 分段读取，每次不超过 {cap} 行。"
+    )
+
+
+def make_read_guard(
+    repo_path: str, max_read_lines: int = _DEFAULT_MAX_READ_LINES
+) -> Callable[..., Any]:
+    """PreToolUse 钩子：Read/Grep/Glob 只能碰仓库内的非敏感路径；Read 单次行数有上限。
 
     路径用 realpath 展开后再比较，符号链接逃不出去。Grep 的 `pattern` 是正则不是路径，不检查。
     """
@@ -135,6 +173,12 @@ def make_read_guard(repo_path: str) -> Callable[..., Any]:
                 resolved = os.path.realpath(os.path.join(root, raw))
                 if not _inside(root, resolved):
                     return _deny(f"禁止访问仓库外路径: {raw}")
+        if tool == "Read":
+            tool_input = input_data.get("tool_input") or {}
+            raw = str(tool_input.get("file_path") or "")
+            reason = _read_cap_reason(root, raw, tool_input, max_read_lines) if raw else None
+            if reason:
+                return _deny(reason)
         return {}
 
     return guard
@@ -142,7 +186,10 @@ def make_read_guard(repo_path: str) -> Callable[..., Any]:
 
 def read_guard_hooks(repo_path: str) -> dict[str, list[Any]]:
     """按当前 provider 的钩子格式包装守卫：Claude SDK 要 HookMatcher，OpenAI 运行时要字典。"""
-    guard = make_read_guard(repo_path)
+    guard = make_read_guard(
+        repo_path,
+        max_read_lines=int(os.environ.get("CODE_QA_MAX_READ_LINES", _DEFAULT_MAX_READ_LINES)),
+    )
     provider = (os.getenv("AGENT_PROVIDER") or os.getenv("AGENT_SDK") or "claude").lower()
     if provider in {"claude", "claude_sdk", "anthropic"}:
         from claude_agent_sdk import HookMatcher
