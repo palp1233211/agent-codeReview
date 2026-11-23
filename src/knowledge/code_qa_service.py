@@ -20,9 +20,13 @@ from .code_qa import CodeQA, CodeQADrafter, render_reply
 
 logger = logging.getLogger(__name__)
 
-_ACK = "收到，正在查代码，通常要 1~2 分钟，查完回复你。"
+_ACK = "收到，正在查代码，通常要 1~5 分钟，查完回复你。"
 _NOT_ALLOWED = "这个会话还没有开通代码问答。"
 _BUSY = "代码问答正在处理别的问题，请 1~2 分钟后再问一次。"
+_TIMEOUT = (
+    "这个问题涉及的代码比较多，限定时间内没查完。可以缩小范围再问一次，"
+    "比如指定国家（泰国/菲律宾）、处罚项或具体的表。"
+)
 _FAILED = "代码问答这次出错了，请稍后再试；如果一直这样，请联系管理员。"
 _DRAFT_NOTE = "\n\n已整理成知识草稿 #{gap_id}，管理员确认后可用 `/kb approve {gap_id}` 入库。"
 
@@ -126,6 +130,9 @@ class CodeQaService:
     ) -> None:
         try:
             text = self._answer(question, user_id, chat_id, message_id)
+        except TimeoutError:
+            logger.warning("代码问答超时: message_id=%s question=%s", message_id, question[:80])
+            text = _TIMEOUT
         except Exception:  # noqa: BLE001 - 线程边界：agent/模型任何故障都要告知用户，不能静默
             logger.exception("代码问答失败: message_id=%s question=%s", message_id, question[:80])
             text = _FAILED
