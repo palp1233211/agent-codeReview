@@ -20,8 +20,9 @@
 # ---- Guard：该放行的 ----
 - id: guard_pass_have_what
   turns: ["有什么处罚 THT27215G4NHB9Z"]
+  note: 只断言查到了数据（模型偶尔不复述运单号，别拿运单号当判据）
   expect_refused: false
-  must_contain: ["THT27215G4NHB9Z"]
+  must_contain: ["客户投诉"]
   tags: [guard, stats, data]
 
 - id: guard_pass_fine_phrase
@@ -240,3 +241,18 @@
   turns: ["包裹丢失这个处罚项是怎么处罚的", "帮我重跑今天的处罚任务", "没看懂"]
   must_not_contain: ["code_question"]
   tags: [followup, scope]
+
+# ---- 处罚项 + 日期（没有运单/工号/网点）----
+- id: by_cat_yesterday
+  turns: ["昨天包裹丢失的处罚有多少条"]
+  expect_refused: false
+  must_contain: ["包裹丢失"]
+  must_not_contain: ["无法生成查询", "目前支持按"]
+  tags: [stats, data, by_cat]
+
+- id: by_cat_explicit_date
+  turns: ["2026-11-18 客户投诉的处罚统计"]
+  expect_refused: false
+  must_contain: ["客户投诉"]
+  must_not_contain: ["无法生成查询", "目前支持按"]
+  tags: [stats, data, by_cat]
